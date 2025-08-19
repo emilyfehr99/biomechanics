@@ -40,7 +40,7 @@ except ImportError:
     BYTETRACKER_AVAILABLE = False
     print("Warning: ByteTracker not available. Install with: pip install ultralytics supervision")
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='static')
 print("🚀 FLASK APP STARTING WITH PERFORMANCE OPTIMIZATIONS! 🚀")
 print("   Debug mode disabled for speed, threaded for efficiency")
 app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # Reduced to 100MB for better performance
@@ -91,6 +91,10 @@ def log_memory_usage():
 @app.route('/')
 def index():
     return render_template('index.html')
+
+@app.route('/test_logo')
+def test_logo():
+    return send_file('test_logo.html')
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
