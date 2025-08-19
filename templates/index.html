@@ -1,0 +1,1408 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hockey Biomechanics Analysis Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --primary-color: #1e40af;
+            --secondary-color: #3b82f6;
+            --accent-color: #f59e0b;
+            --success-color: #10b981;
+            --danger-color: #ef4444;
+            --dark-color: #1f2937;
+            --light-color: #f8fafc;
+            --border-color: #e5e7eb;
+        }
+
+        body {
+            font-family: 'Inter', sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+        }
+
+        .main-container {
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.1);
+            margin: 20px;
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            color: white;
+            padding: 2rem;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+        }
+
+        .header p {
+            opacity: 0.9;
+            font-weight: 300;
+        }
+
+        .upload-section {
+            padding: 3rem;
+            background: var(--light-color);
+        }
+
+        .upload-area {
+            border: 3px dashed var(--border-color);
+            border-radius: 15px;
+            padding: 3rem;
+            text-align: center;
+            transition: all 0.3s ease;
+            background: white;
+            cursor: pointer;
+        }
+
+        .upload-area:hover {
+            border-color: var(--primary-color);
+            background: #f0f9ff;
+        }
+
+        .upload-area.dragover {
+            border-color: var(--success-color);
+            background: #f0fdf4;
+        }
+
+        .upload-icon {
+            font-size: 4rem;
+            color: var(--primary-color);
+            margin-bottom: 1rem;
+        }
+
+        .analysis-options {
+            padding: 2rem;
+            background: white;
+        }
+
+        .analysis-card {
+            border: 2px solid var(--border-color);
+            border-radius: 15px;
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+            transition: all 0.3s ease;
+            cursor: pointer;
+            background: white;
+        }
+
+        .analysis-card:hover {
+            border-color: var(--primary-color);
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.1);
+        }
+
+        .analysis-card.selected {
+            border-color: var(--primary-color);
+            background: #f0f9ff;
+        }
+
+        .analysis-icon {
+            font-size: 2rem;
+            color: var(--primary-color);
+            margin-bottom: 1rem;
+        }
+
+        .results-section {
+            padding: 2rem;
+            background: white;
+            display: none;
+        }
+
+        .result-card {
+            border: 1px solid var(--border-color);
+            border-radius: 10px;
+            padding: 1.5rem;
+            margin-bottom: 1rem;
+            background: white;
+        }
+
+        .progress-container {
+            display: none;
+            padding: 2rem;
+            text-align: center;
+        }
+
+        .progress-bar {
+            height: 8px;
+            border-radius: 4px;
+            background: var(--border-color);
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, var(--primary-color), var(--secondary-color));
+            width: 0%;
+            transition: width 0.3s ease;
+        }
+
+        .file-info {
+            background: #f8fafc;
+            border-radius: 10px;
+            padding: 1rem;
+            margin: 1rem 0;
+            display: none;
+        }
+
+        .btn-primary {
+            background: linear-gradient(135deg, var(--primary-color), var(--secondary-color));
+            border: none;
+            border-radius: 10px;
+            padding: 12px 24px;
+            font-weight: 600;
+            transition: all 0.3s ease;
+        }
+
+        .btn-primary:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 25px rgba(30, 64, 175, 0.3);
+        }
+
+        .btn-success {
+            background: linear-gradient(135deg, var(--success-color), #059669);
+            border: none;
+            border-radius: 10px;
+            padding: 12px 24px;
+            font-weight: 600;
+        }
+
+        .alert {
+            border-radius: 10px;
+            border: none;
+        }
+
+        .loading-spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid #f3f3f3;
+            border-top: 3px solid var(--primary-color);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+        .download-btn {
+            background: var(--success-color);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            padding: 8px 16px;
+            text-decoration: none;
+            display: inline-block;
+            margin: 5px;
+            transition: all 0.3s ease;
+        }
+
+        .download-btn:hover {
+            background: #059669;
+            color: white;
+            text-decoration: none;
+            transform: translateY(-1px);
+        }
+
+        .preview-container {
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 10px;
+            background: #f8f9fa;
+        }
+
+        .result-card {
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 1.5rem;
+            background: white;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+            transition: all 0.3s ease;
+        }
+
+        .result-card:hover {
+            box-shadow: 0 4px 16px rgba(0, 0, 0, 0.15);
+            transform: translateY(-2px);
+        }
+
+        .btn {
+            border-radius: 8px;
+            font-weight: 500;
+            transition: all 0.3s ease;
+        }
+
+        .btn:hover {
+            transform: translateY(-1px);
+        }
+    </style>
+</head>
+<body>
+    <div class="main-container">
+        <!-- Header -->
+        <div class="header">
+            <h1><i class="fas fa-hockey-puck me-3"></i>Hockey Biomechanics Analysis</h1>
+            <p>Advanced video analysis tools for hockey performance optimization</p>
+        </div>
+
+        <!-- Upload Section -->
+        <div class="upload-section">
+            <div class="row">
+                <div class="col-md-8 mx-auto">
+                    <div class="upload-area" id="uploadArea">
+                        <div class="upload-icon">
+                            <i class="fas fa-cloud-upload-alt"></i>
+                        </div>
+                        <h4>Upload Your Hockey Video</h4>
+                        <p class="text-muted">Drag and drop your MP4 file here or click to browse</p>
+                        <input type="file" id="videoFile" accept=".mp4,.avi,.mov,.mkv" style="display: none;">
+                        <button class="btn btn-primary mt-3" onclick="document.getElementById('videoFile').click()">
+                            <i class="fas fa-folder-open me-2"></i>Choose File
+                        </button>
+                    </div>
+
+                    <div class="file-info" id="fileInfo">
+                        <div class="d-flex align-items-center">
+                            <i class="fas fa-video me-3 text-primary"></i>
+                            <div>
+                                <h6 class="mb-1" id="fileName"></h6>
+                                <small class="text-muted" id="fileSize"></small>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Analysis Options -->
+        <div class="analysis-options" id="analysisOptions" style="display: none;">
+            <h4 class="mb-4 text-center">Select Analysis Type</h4>
+            <div class="row">
+
+                <div class="col-md-4 mb-3">
+                    <div class="analysis-card" data-type="skeleton">
+                        <div class="analysis-icon">
+                            <i class="fas fa-user"></i>
+                        </div>
+                        <h5>Skeleton Analysis</h5>
+                        <p class="text-muted">Track player pose and generate skeleton animations</p>
+                    </div>
+                </div>
+
+                <div class="col-md-4 mb-3">
+                    <div class="analysis-card" data-type="goalie">
+                        <div class="analysis-icon">
+                            <i class="fas fa-shield-alt"></i>
+                        </div>
+                        <h5>Goalie Analysis</h5>
+                        <p class="text-muted">Track goalie movements and save mechanics</p>
+                    </div>
+                </div>
+
+                <div class="col-md-4 mb-3">
+                    <div class="analysis-card" data-type="motion_capture">
+                        <div class="analysis-icon">
+                            <i class="fas fa-dumbbell"></i>
+                        </div>
+                        <h5>Off-Ice Analysis</h5>
+                        <p class="text-muted">Markerless motion capture for workouts, exercises & training</p>
+                    </div>
+                </div>
+
+                <div class="col-md-4 mb-3">
+                    <div class="analysis-card" data-type="speed">
+                        <div class="analysis-icon">
+                            <i class="fas fa-tachometer-alt"></i>
+                        </div>
+                        <h5>Player Speed Analysis</h5>
+                        <p class="text-muted">Track player speed and acceleration with enhanced ByteTracker</p>
+                    </div>
+                </div>
+            </div>
+
+            <div class="text-center mt-4">
+                <button class="btn btn-primary btn-lg" id="analyzeBtn" disabled>
+                    <i class="fas fa-play me-2"></i>Start Analysis
+                </button>
+            </div>
+        </div>
+
+        <!-- Progress Section -->
+        <div class="progress-container" id="progressContainer">
+            <h4>Processing Video...</h4>
+            <div class="progress-bar">
+                <div class="progress-fill" id="progressFill"></div>
+            </div>
+            <p class="mt-3" id="progressText">Initializing analysis...</p>
+        </div>
+
+        <!-- Results Section -->
+        <div class="results-section" id="resultsSection">
+            <h4 class="mb-4">Analysis Results</h4>
+            <div id="resultsContent"></div>
+        </div>
+
+        <!-- Debug and Memory Management Buttons -->
+        <div class="text-center mt-3 mb-3">
+            <button type="button" class="btn btn-warning me-2" onclick="testModal()">
+                <i class="fas fa-bug me-2"></i>Test Modal (Debug)
+            </button>
+            <button type="button" class="btn btn-info me-2" onclick="checkMemory()">
+                <i class="fas fa-memory me-2"></i>Check Memory
+            </button>
+            <button type="button" class="btn btn-danger me-2" onclick="forceCleanup()">
+                <i class="fas fa-broom me-2"></i>Force Cleanup
+            </button>
+        </div>
+
+        <!-- Interactive Player Selection Modal -->
+        <div class="modal fade" id="playerSelectionModal" tabindex="-1" aria-labelledby="playerSelectionModalLabel" aria-hidden="true">
+            <div class="modal-dialog modal-xl">
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h5 class="modal-title" id="playerSelectionModalLabel">
+                            <i class="fas fa-mouse-pointer me-2"></i>Select Player for Analysis
+                        </h5>
+                        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+                    </div>
+                    <div class="modal-body">
+                        <!-- Detection Method Selection -->
+                        <div class="mb-4">
+                            <h6 class="mb-3"><i class="fas fa-cogs me-2"></i>Select Detection Method:</h6>
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <div class="card detection-option" data-method="yolo" style="cursor: pointer; border: 2px solid #e5e7eb;">
+                                        <div class="card-body text-center">
+                                            <i class="fas fa-user-friends fa-2x text-primary mb-2"></i>
+                                            <h6 class="card-title">YOLO Person Detection</h6>
+                                            <p class="card-text small">General person detection using YOLOv8 model</p>
+                                            <small class="text-muted">Good for: General tracking, off-ice analysis</small>
+                                        </div>
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <div class="card detection-option" data-method="roboflow" style="cursor: pointer; border: 2px solid #e5e7eb;">
+                                        <div class="card-body text-center">
+                                            <i class="fas fa-hockey-puck fa-2x text-success mb-2"></i>
+                                            <h6 class="card-title">Roboflow Hockey Detection</h6>
+                                            <p class="card-text small">Custom hockey player detection model</p>
+                                            <small class="text-muted">Good for: Hockey-specific analysis</small>
+                                            <div class="mt-2">
+                                                <small class="text-warning">
+                                                    <i class="fas fa-clock me-1"></i>May take 10-30 seconds
+                                                </small>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <div class="alert alert-info">
+                            <i class="fas fa-info-circle me-2"></i>
+                            <strong>Click anywhere</strong> to place the green dot on the player you want to track, or <strong>drag the existing dot</strong> to move it. 
+                            The dot and dashed box will mark your selection and be used for the entire video analysis.
+                        </div>
+
+                        <div class="video-container text-center" style="position: relative; display: inline-block;">
+                            <canvas id="playerSelectionCanvas" style="border: 2px solid #ccc; cursor: default; max-width: 100%;"></canvas>
+                            <div id="selectionInstructions" style="position: absolute; top: 10px; left: 10px; background: rgba(0,0,0,0.8); color: white; padding: 10px; border-radius: 5px; font-weight: bold;">
+                                <i class="fas fa-mouse-pointer me-2"></i>Click on the player to select
+                            </div>
+                            <div id="selectionBox" style="position: absolute; border: 2px dashed #ff6b6b; background: rgba(255, 107, 107, 0.1); display: none;"></div>
+                        </div>
+                        <div class="mt-3 text-center">
+                            <button type="button" class="btn btn-primary btn-lg" id="startAnalysis">
+                                <i class="fas fa-play me-2"></i>Start Analysis
+                            </button>
+                            <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">
+                                Cancel
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        let selectedFile = null;
+        let selectedAnalysis = null;
+
+        // File upload handling
+        const uploadArea = document.getElementById('uploadArea');
+        const fileInput = document.getElementById('videoFile');
+        const fileInfo = document.getElementById('fileInfo');
+        const analysisOptions = document.getElementById('analysisOptions');
+        const analyzeBtn = document.getElementById('analyzeBtn');
+
+        // Drag and drop functionality
+        uploadArea.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            uploadArea.classList.add('dragover');
+        });
+
+        uploadArea.addEventListener('dragleave', () => {
+            uploadArea.classList.remove('dragover');
+        });
+
+        uploadArea.addEventListener('drop', (e) => {
+            e.preventDefault();
+            uploadArea.classList.remove('dragover');
+            const files = e.dataTransfer.files;
+            if (files.length > 0) {
+                handleFile(files[0]);
+            }
+        });
+
+        fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                handleFile(e.target.files[0]);
+            }
+        });
+
+        function handleFile(file) {
+            if (!file.type.startsWith('video/')) {
+                showAlert('Please select a valid video file.', 'danger');
+                return;
+            }
+
+            selectedFile = file;
+            document.getElementById('fileName').textContent = file.name;
+            document.getElementById('fileSize').textContent = formatFileSize(file.size);
+            fileInfo.style.display = 'block';
+            analysisOptions.style.display = 'block';
+            showAlert('Video uploaded successfully! Select an analysis type.', 'success');
+        }
+
+        // Analysis selection
+        document.querySelectorAll('.analysis-card').forEach(card => {
+            card.addEventListener('click', () => {
+                document.querySelectorAll('.analysis-card').forEach(c => c.classList.remove('selected'));
+                card.classList.add('selected');
+                selectedAnalysis = card.dataset.type;
+                analyzeBtn.disabled = false;
+                
+                // Show immediate button for interactive analyses
+                const interactiveAnalyses = ['exercise', 'motion_capture'];
+                if (interactiveAnalyses.includes(selectedAnalysis)) {
+                    const immediateButton = document.createElement('div');
+                    immediateButton.className = 'alert alert-info mt-3';
+                    immediateButton.innerHTML = `
+                        <i class="fas fa-info-circle me-2"></i>
+                        <strong>${selectedAnalysis.charAt(0).toUpperCase() + selectedAnalysis.slice(1)} Analysis</strong> requires player selection.
+                        <button class="btn btn-primary btn-sm ms-2" onclick="testModal()">
+                            <i class="fas fa-mouse-pointer me-1"></i>Test Player Selection
+                        </button>
+                    `;
+                    
+                    // Remove any existing immediate button
+                    const existingButton = document.querySelector('.alert-info');
+                    if (existingButton) {
+                        existingButton.remove();
+                    }
+                    
+                    // Add the new button
+                    analyzeBtn.parentNode.insertBefore(immediateButton, analyzeBtn.nextSibling);
+                }
+            });
+        });
+
+        // Analysis execution
+        analyzeBtn.addEventListener('click', async () => {
+            if (!selectedFile || !selectedAnalysis) {
+                showAlert('Please select a file and analysis type.', 'danger');
+                return;
+            }
+            
+            console.log('Starting analysis:', selectedAnalysis);
+
+            const formData = new FormData();
+            formData.append('video', selectedFile);
+
+            try {
+                // Upload file
+                showProgress('Uploading video...', 10);
+                const uploadResponse = await fetch('/upload', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!uploadResponse.ok) {
+                    throw new Error('Upload failed');
+                }
+
+                const uploadResult = await uploadResponse.json();
+                showProgress('Processing video...', 50);
+
+                // Start analysis
+                const analysisResponse = await fetch('/analyze', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({
+                        analysis_type: selectedAnalysis,
+                        filename: uploadResult.filename
+                    })
+                });
+
+                if (!analysisResponse.ok) {
+                    throw new Error('Analysis failed');
+                }
+
+                const analysisResult = await analysisResponse.json();
+                console.log('Analysis result:', analysisResult);
+                
+                // Handle interactive analyses that require player selection
+                if (analysisResult.requires_interaction) {
+                    hideProgress();
+                    console.log('Analysis requires interaction, showing modal...');
+                    console.log('Video filename:', analysisResult.video_filename);
+                    console.log('Analysis type:', analysisResult.analysis_type);
+                    console.log('Full analysis result:', analysisResult);
+                    
+                    // Show loading state for the modal
+                    showModalLoading();
+                    
+                    // Force show the modal immediately
+                    setTimeout(() => {
+                        console.log('Calling showPlayerSelectionModal...');
+                        showPlayerSelectionModal(analysisResult.video_filename, analysisResult.analysis_type);
+                    }, 100);
+                    return;
+                } else {
+                    console.log('Analysis does NOT require interaction:', analysisResult);
+                }
+                
+                showProgress('Analysis complete!', 100);
+                
+                setTimeout(() => {
+                    hideProgress();
+                    showResults(analysisResult);
+                }, 1000);
+
+            } catch (error) {
+                hideProgress();
+                showAlert('Analysis failed: ' + error.message, 'danger');
+            }
+        });
+
+        function showProgress(text, percentage) {
+            document.getElementById('progressContainer').style.display = 'block';
+            document.getElementById('progressText').textContent = text;
+            document.getElementById('progressFill').style.width = percentage + '%';
+        }
+
+        function hideProgress() {
+            document.getElementById('progressContainer').style.display = 'none';
+        }
+
+        function showModalLoading() {
+            // Show a loading overlay on the modal
+            const modal = document.getElementById('playerSelectionModal');
+            if (modal) {
+                const loadingOverlay = document.createElement('div');
+                loadingOverlay.id = 'modalLoadingOverlay';
+                loadingOverlay.style.cssText = `
+                    position: absolute;
+                    top: 0;
+                    left: 0;
+                    width: 100%;
+                    height: 100%;
+                    background: rgba(0,0,0,0.8);
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    z-index: 9999;
+                    color: white;
+                    font-size: 18px;
+                `;
+                loadingOverlay.innerHTML = `
+                    <div class="text-center">
+                        <div class="spinner-border text-light mb-3" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                        <div>Loading detection models...</div>
+                        <div class="small text-muted mt-2">This may take a few seconds for the first time</div>
+                    </div>
+                `;
+                modal.appendChild(loadingOverlay);
+            }
+        }
+        
+        function hideModalLoading() {
+            const loadingOverlay = document.getElementById('modalLoadingOverlay');
+            if (loadingOverlay) {
+                loadingOverlay.remove();
+            }
+        }
+        
+        function showResults(result) {
+            const resultsSection = document.getElementById('resultsSection');
+            const resultsContent = document.getElementById('resultsContent');
+            
+            let html = `
+                <div class="alert alert-success">
+                    <i class="fas fa-check-circle me-2"></i>${result.message}
+                </div>
+                
+                <div class="row">
+                    <div class="col-12">
+                        <h5 class="mb-3"><i class="fas fa-chart-line me-2"></i>Analysis Results</h5>
+                    </div>
+                </div>
+            `;
+
+            if (result.results && result.results.length > 0) {
+                result.results.forEach((item, index) => {
+                    html += `
+                        <div class="result-card mb-4">
+                            <div class="row">
+                                <div class="col-md-8">
+                                    <h6><i class="fas fa-${getIconForType(item.type)} me-2"></i>${item.description}</h6>
+                                    <p class="text-muted mb-2">${item.name}</p>
+                                    
+                                    ${item.preview ? `
+                                        <div class="preview-container mb-3">
+                                            ${item.type === 'video' ? `
+                                                <video controls class="w-100" style="max-height: 300px;">
+                                                    <source src="/view/${item.name}" type="video/mp4">
+                                                    Your browser does not support the video tag.
+                                                </video>
+                                            ` : item.type === 'image' ? `
+                                                <img src="/view/${item.name}" class="img-fluid" style="max-height: 300px;" alt="Analysis Result">
+                                            ` : ''}
+                                        </div>
+                                    ` : ''}
+                                </div>
+                                <div class="col-md-4">
+                                    <div class="d-flex flex-column">
+                                        ${item.download ? `
+                                            <a href="/download/${item.name}" class="btn btn-success mb-2">
+                                                <i class="fas fa-download me-1"></i>Download ${item.type.toUpperCase()}
+                                            </a>
+                                        ` : ''}
+                                        ${item.preview ? `
+                                            <a href="/view/${item.name}" class="btn btn-primary" target="_blank">
+                                                <i class="fas fa-eye me-1"></i>View Full Size
+                                            </a>
+                                        ` : ''}
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    `;
+                });
+            }
+            
+            // Add fallback for interactive analyses if modal doesn't appear
+            if (result.requires_interaction) {
+                html += `
+                    <div class="alert alert-warning">
+                        <h6><i class="fas fa-exclamation-triangle me-2"></i>Interactive Player Selection</h6>
+                        <p>If the player selection modal didn't appear, click the button below to open it manually:</p>
+                        <button class="btn btn-primary btn-lg" onclick="showPlayerSelectionModal('${result.video_filename}', '${result.analysis_type}')">
+                            <i class="fas fa-mouse-pointer me-2"></i>Open Player Selection Modal
+                        </button>
+                        <p class="mt-2 text-muted"><small>This will open a window where you can select the player to analyze.</small></p>
+                    </div>
+                `;
+            }
+
+            resultsContent.innerHTML = html;
+            resultsSection.style.display = 'block';
+            resultsSection.scrollIntoView({ behavior: 'smooth' });
+        }
+
+        function getIconForType(type) {
+            const icons = {
+                'video': 'video',
+                'csv': 'table',
+                'image': 'chart-bar',
+                'data': 'database'
+            };
+            return icons[type] || 'file';
+        }
+
+        // Interactive player selection variables
+        let currentVideoFrame = null;
+        let selectedBbox = null;
+        let currentFilename = null;
+        let currentAnalysisType = null;
+        // New player detection system variables
+        window.detectedPlayers = [];
+        window.selectedPlayerIndex = undefined;
+
+        // Function to get canvas coordinates from mouse event
+        function getCanvasCoords(e) {
+            const canvas = document.getElementById('playerSelectionCanvas');
+            const rect = canvas.getBoundingClientRect();
+            
+            // Get coordinates relative to the displayed canvas
+            const displayX = e.clientX - rect.left;
+            const displayY = e.clientY - rect.top;
+            
+            // Calculate scaling factors between display size and internal canvas size
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+            
+            // Convert to actual canvas coordinates
+            const canvasX = displayX * scaleX;
+            const canvasY = displayY * scaleY;
+            
+            console.log('Mouse click:');
+            console.log('  Display coords:', displayX, displayY);
+            console.log('  Canvas rect:', rect.width, 'x', rect.height);
+            console.log('  Canvas internal:', canvas.width, 'x', canvas.height);
+            console.log('  Scale factors:', scaleX, scaleY);
+            console.log('  Final canvas coords:', canvasX, canvasY);
+            
+            return {
+                x: canvasX,
+                y: canvasY
+            };
+        }
+
+        // Player selection modal functionality
+        function showPlayerSelectionModal(filename, analysisType = 'speed') {
+            console.log('=== showPlayerSelectionModal called ===');
+            console.log('filename:', filename);
+            console.log('analysisType:', analysisType);
+            console.log('Modal element exists:', !!document.getElementById('playerSelectionModal'));
+            
+            currentFilename = filename;
+            currentAnalysisType = analysisType;
+            
+            // Update modal title based on analysis type
+            const modalTitle = document.getElementById('playerSelectionModalLabel');
+            const analysisNames = {
+                'motion_capture': 'Off-Ice Analysis'
+            };
+            modalTitle.innerHTML = `<i class="fas fa-mouse-pointer me-2"></i>Select Player for ${analysisNames[analysisType] || 'Analysis'}`;
+            
+
+            
+            // Get the modal element
+            const modalElement = document.getElementById('playerSelectionModal');
+            console.log('Modal element found:', modalElement);
+            if (!modalElement) {
+                console.error('Modal element not found!');
+                showAlert('Error: Modal not found. Please refresh the page.', 'danger');
+                return;
+            }
+            
+            // Create and show the modal with multiple fallback methods
+            try {
+                // Method 1: Try Bootstrap modal
+                if (typeof bootstrap !== 'undefined') {
+                    const modal = new bootstrap.Modal(modalElement);
+                    console.log('Bootstrap modal created:', modal);
+                    modal.show();
+                    console.log('Modal show() called');
+                } else {
+                    // Method 2: Direct show if Bootstrap not available
+                    console.log('Bootstrap not available, using direct show');
+                    modalElement.style.display = 'block';
+                    modalElement.classList.add('show');
+                    document.body.classList.add('modal-open');
+                    
+                    // Add backdrop
+                    const backdrop = document.createElement('div');
+                    backdrop.className = 'modal-backdrop fade show';
+                    document.body.appendChild(backdrop);
+                }
+            } catch (error) {
+                console.error('Error creating/showing modal:', error);
+                // Method 3: Fallback to direct show
+                console.log('Using fallback modal show method');
+                modalElement.style.display = 'block';
+                modalElement.classList.add('show');
+                document.body.classList.add('modal-open');
+            }
+            
+            // Load video frame
+            loadVideoFrame(filename);
+            
+            // Set up detection method selection
+            setupDetectionMethodSelection();
+        }
+        
+        function setupDetectionMethodSelection() {
+            // Add click handlers for detection method selection
+            document.querySelectorAll('.detection-option').forEach(option => {
+                option.addEventListener('click', function() {
+                    // Remove selection from all options
+                    document.querySelectorAll('.detection-option').forEach(opt => {
+                        opt.style.border = '2px solid #e5e7eb';
+                        opt.style.backgroundColor = 'white';
+                    });
+                    
+                    // Select this option
+                    this.style.border = '2px solid #1e40af';
+                    this.style.backgroundColor = '#f0f9ff';
+                    
+                    // Get the selected method
+                    const method = this.dataset.method;
+                    console.log('Selected detection method:', method);
+                    
+                    // Load detection results based on method
+                    if (method === 'yolo') {
+                        loadYoloDetection(currentFilename);
+                    } else if (method === 'roboflow') {
+                        loadRoboflowDetection(currentFilename);
+                    }
+                });
+            });
+            
+            // Default to YOLO detection
+            const yoloOption = document.querySelector('.detection-option[data-method="yolo"]');
+            if (yoloOption) {
+                yoloOption.click();
+            }
+                }
+        
+        function loadYoloDetection(filename) {
+            console.log('Loading YOLO detection for:', filename);
+            
+            // Hide loading overlay once we start loading
+            hideModalLoading();
+            
+            fetch(`/detect_yolo/${filename}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        showAlert('Error loading YOLO detection: ' + data.error, 'danger');
+                        return;
+                    }
+                    
+                    const canvas = document.getElementById('playerSelectionCanvas');
+                    const ctx = canvas.getContext('2d');
+                    
+                    // Set canvas internal size to match video
+                    canvas.width = data.width;
+                    canvas.height = data.height;
+                    
+                    // Set canvas display size to fit container (max 800px wide)
+                    const maxDisplayWidth = 800;
+                    let displayWidth = data.width;
+                    let displayHeight = data.height;
+                    
+                    if (displayWidth > maxDisplayWidth) {
+                        const ratio = maxDisplayWidth / displayWidth;
+                        displayWidth = maxDisplayWidth;
+                        displayHeight = displayHeight * ratio;
+                    }
+                    
+                    canvas.style.width = displayWidth + 'px';
+                    canvas.style.height = displayHeight + 'px';
+                    
+                    console.log('YOLO detection results:', data.people);
+                    
+                    // Load image
+                    const img = new Image();
+                    img.onload = function() {
+                        ctx.drawImage(img, 0, 0);
+                        currentVideoFrame = img;
+                        
+                        // Store detected people globally
+                        window.detectedPlayers = data.people || [];
+                        
+                        // Setup event listeners for player selection
+                        setupPlayerSelectionListeners();
+                        
+                        // Draw all detected people as outlined boxes
+                        drawPlayerOutlines();
+                        
+                        // Update instructions
+                        if (window.detectedPlayers.length > 0) {
+                            document.getElementById('selectionInstructions').innerHTML = 
+                                `<i class="fas fa-hand-pointer me-2"></i>Click on any person outline to select them (${window.detectedPlayers.length} people detected)`;
+                        } else {
+                            document.getElementById('selectionInstructions').innerHTML = 
+                                `<i class="fas fa-exclamation-triangle me-2"></i>No people detected. Try uploading a different video or manually select an area.`;
+                        }
+                    };
+                    img.src = 'data:image/jpeg;base64,' + data.frame;
+                })
+                .catch(error => {
+                    showAlert('Error loading YOLO detection: ' + error, 'danger');
+                });
+        }
+        
+        function loadRoboflowDetection(filename) {
+            console.log('Loading Roboflow detection for:', filename);
+            
+            // Hide loading overlay once we start loading
+            hideModalLoading();
+            
+            // Add timeout for Roboflow detection
+            const timeoutPromise = new Promise((_, reject) => {
+                setTimeout(() => reject(new Error('Roboflow detection timed out after 30 seconds')), 30000);
+            });
+            
+            const detectionPromise = fetch(`/detect_players/${filename}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        showAlert('Error loading Roboflow detection: ' + data.error, 'danger');
+                        return;
+                    }
+                    
+                    const canvas = document.getElementById('playerSelectionCanvas');
+                    const ctx = canvas.getContext('2d');
+                    
+                    // Set canvas internal size to match video
+                    canvas.width = data.width;
+                    canvas.height = data.height;
+                    
+                    // Set canvas display size to fit container (max 800px wide)
+                    const maxDisplayWidth = 800;
+                    let displayWidth = data.width;
+                    let displayHeight = data.height;
+                    
+                    if (displayWidth > maxDisplayWidth) {
+                        const ratio = maxDisplayWidth / displayWidth;
+                        displayWidth = maxDisplayWidth;
+                        displayHeight = displayHeight * ratio;
+                    }
+                    
+                    canvas.style.width = displayWidth + 'px';
+                    canvas.style.height = displayHeight + 'px';
+                    
+                    console.log('Roboflow detection results:', data.players);
+                    
+                    // Load image
+                    const img = new Image();
+                    img.onload = function() {
+                        ctx.drawImage(img, 0, 0);
+                        currentVideoFrame = img;
+                        
+                        // Store detected players globally
+                        window.detectedPlayers = data.players || [];
+                        
+                        // Setup event listeners for player selection
+                        setupPlayerSelectionListeners();
+                        
+                        // Draw all detected players as outlined boxes
+                        drawPlayerOutlines();
+                        
+                        // Update instructions
+                        if (window.detectedPlayers.length > 0) {
+                            document.getElementById('selectionInstructions').innerHTML = 
+                                `<i class="fas fa-hand-pointer me-2"></i>Click on any player outline to select them (${window.detectedPlayers.length} players detected)`;
+                        } else {
+                            document.getElementById('selectionInstructions').innerHTML = 
+                                `<i class="fas fa-exclamation-triangle me-2"></i>No players detected. Try uploading a different video or manually select an area.`;
+                        }
+                    };
+                    img.src = 'data:image/jpeg;base64,' + data.frame;
+                });
+            
+            // Race between timeout and detection
+            Promise.race([detectionPromise, timeoutPromise])
+                .catch(error => {
+                    if (error.message.includes('timed out')) {
+                        showAlert('Roboflow detection is taking too long. Try using YOLO detection instead, or check your internet connection.', 'warning');
+                        // Auto-switch to YOLO detection
+                        document.querySelector('.detection-option[data-method="yolo"]').click();
+                    } else {
+                        showAlert('Error loading Roboflow detection: ' + error, 'danger');
+                    }
+                });
+        }
+        
+        function loadVideoFrame(filename) {
+            fetch(`/detect_players/${filename}`)
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        showAlert('Error loading video frame: ' + data.error, 'danger');
+                        return;
+                    }
+                    
+                    const canvas = document.getElementById('playerSelectionCanvas');
+                    const ctx = canvas.getContext('2d');
+                    
+                    // Set canvas internal size to match video
+                    canvas.width = data.width;
+                    canvas.height = data.height;
+                    
+                    // Set canvas display size to fit container (max 800px wide)
+                    const maxDisplayWidth = 800;
+                    let displayWidth = data.width;
+                    let displayHeight = data.height;
+                    
+                    if (displayWidth > maxDisplayWidth) {
+                        const ratio = maxDisplayWidth / displayWidth;
+                        displayWidth = maxDisplayWidth;
+                        displayHeight = displayHeight * ratio;
+                    }
+                    
+                    canvas.style.width = displayWidth + 'px';
+                    canvas.style.height = displayHeight + 'px';
+                    
+                    console.log('Video dimensions:', data.width, 'x', data.height);
+                    console.log('Canvas internal size:', canvas.width, 'x', canvas.height);
+                    console.log('Canvas display size:', displayWidth, 'x', displayHeight);
+                    console.log('Detected players:', data.players);
+                    
+                    // Load image
+                    const img = new Image();
+                    img.onload = function() {
+                        ctx.drawImage(img, 0, 0);
+                        currentVideoFrame = img;
+                        
+                        // Store detected players globally
+                        window.detectedPlayers = data.players || [];
+                        
+                        // Setup event listeners for player selection
+                        setupPlayerSelectionListeners();
+                        
+                        // Draw all detected players as outlined boxes
+                        drawPlayerOutlines();
+                        
+                        // Update instructions
+                        if (window.detectedPlayers.length > 0) {
+                            document.getElementById('selectionInstructions').innerHTML = 
+                                `<i class="fas fa-hand-pointer me-2"></i>Click on any player outline to select them (${window.detectedPlayers.length} players detected)`;
+                        } else {
+                            document.getElementById('selectionInstructions').innerHTML = 
+                                `<i class="fas fa-exclamation-triangle me-2"></i>No players detected. Try uploading a different video or manually select an area.`;
+                        }
+                    };
+                    img.src = 'data:image/jpeg;base64,' + data.frame;
+                })
+                .catch(error => {
+                    showAlert('Error loading video frame: ' + error, 'danger');
+                });
+        }
+
+        // Function to draw all detected players as outlined boxes
+        function drawPlayerOutlines() {
+            if (!currentVideoFrame || !window.detectedPlayers) return;
+            
+            const canvas = document.getElementById('playerSelectionCanvas');
+            const ctx = canvas.getContext('2d');
+            
+            // Redraw the video frame
+            ctx.drawImage(currentVideoFrame, 0, 0);
+            
+            // Draw each detected player as an outlined box
+            window.detectedPlayers.forEach((player, index) => {
+                const [x, y, width, height] = player.bbox;
+                
+                // Draw outline box
+                ctx.strokeStyle = '#00ff00';
+                ctx.lineWidth = 3;
+                ctx.setLineDash([]);
+                ctx.strokeRect(x, y, width, height);
+                
+                // Draw player number
+                ctx.fillStyle = '#00ff00';
+                ctx.font = 'bold 16px Arial';
+                ctx.fillText(`Player ${index + 1}`, x + 5, y - 5);
+                
+                // Draw confidence score
+                ctx.fillStyle = '#ffff00';
+                ctx.font = '12px Arial';
+                ctx.fillText(`${Math.round(player.confidence * 100)}%`, x + 5, y + height + 15);
+            });
+            
+            // If a player is selected, highlight it
+            if (window.selectedPlayerIndex !== undefined) {
+                const selectedPlayer = window.detectedPlayers[window.selectedPlayerIndex];
+                if (selectedPlayer) {
+                    const [x, y, width, height] = selectedPlayer.bbox;
+                    
+                    // Draw highlighted selection
+                    ctx.strokeStyle = '#ff0000';
+                    ctx.lineWidth = 4;
+                    ctx.setLineDash([10, 5]);
+                    ctx.strokeRect(x, y, width, height);
+                    ctx.setLineDash([]);
+                    
+                    // Draw selection indicator
+                    ctx.fillStyle = '#ff0000';
+                    ctx.font = 'bold 20px Arial';
+                    ctx.fillText('SELECTED', x + 5, y - 10);
+                }
+            }
+        }
+
+        // Function to setup canvas event listeners for player selection
+        function setupPlayerSelectionListeners() {
+            const canvas = document.getElementById('playerSelectionCanvas');
+            if (!canvas) return;
+            
+            // Clear any existing listeners
+            canvas.onclick = null;
+            canvas.onmousemove = null;
+            
+            // Click to select player
+            canvas.addEventListener('click', function(e) {
+                const mousePos = getCanvasCoords(e);
+                console.log('Click at:', mousePos);
+                
+                // Check if click is inside any player box
+                let clickedPlayerIndex = -1;
+                for (let i = 0; i < window.detectedPlayers.length; i++) {
+                    const player = window.detectedPlayers[i];
+                    const [x, y, width, height] = player.bbox;
+                    
+                    if (mousePos.x >= x && mousePos.x <= x + width &&
+                        mousePos.y >= y && mousePos.y <= y + height) {
+                        clickedPlayerIndex = i;
+                        break;
+                    }
+                }
+                
+                if (clickedPlayerIndex >= 0) {
+                    // Player selected
+                    window.selectedPlayerIndex = clickedPlayerIndex;
+                    const selectedPlayer = window.detectedPlayers[clickedPlayerIndex];
+                    selectedBbox = selectedPlayer.bbox;
+                    
+                    console.log('Selected player:', clickedPlayerIndex, selectedPlayer);
+                    
+                    // Redraw with selection highlighted
+                    drawPlayerOutlines();
+                    
+                    // Update instructions
+                    document.getElementById('selectionInstructions').innerHTML = 
+                        `<i class="fas fa-check me-2"></i>Player ${clickedPlayerIndex + 1} selected! Click "Start Analysis" to proceed.`;
+                } else {
+                    // Clicked outside all players
+                    window.selectedPlayerIndex = undefined;
+                    selectedBbox = null;
+                    
+                    // Redraw without selection
+                    drawPlayerOutlines();
+                    
+                    // Update instructions
+                    document.getElementById('selectionInstructions').innerHTML = 
+                        `<i class="fas fa-hand-pointer me-2"></i>Click on any player outline to select them (${window.detectedPlayers.length} players detected)`;
+                }
+            });
+            
+            // Mouse move to show hover effect
+            canvas.addEventListener('mousemove', function(e) {
+                const mousePos = getCanvasCoords(e);
+                
+                // Check if mouse is over any player box
+                let hoveredPlayerIndex = -1;
+                for (let i = 0; i < window.detectedPlayers.length; i++) {
+                    const player = window.detectedPlayers[i];
+                    const [x, y, width, height] = player.bbox;
+                    
+                    if (mousePos.x >= x && mousePos.x <= x + width &&
+                        mousePos.y >= y && mousePos.y <= y + height) {
+                        hoveredPlayerIndex = i;
+                        break;
+                    }
+                }
+                
+                // Change cursor based on hover
+                if (hoveredPlayerIndex >= 0) {
+                    canvas.style.cursor = 'pointer';
+                } else {
+                    canvas.style.cursor = 'default';
+                }
+            });
+        }
+
+        // Start analysis button (handles all analysis types)
+        document.getElementById('startAnalysis').addEventListener('click', function() {
+            if (!selectedBbox || !currentFilename || !currentAnalysisType) {
+                showAlert('Please select a player first', 'warning');
+                return;
+            }
+            
+            // Show progress
+            showProgress(`Processing ${currentAnalysisType} analysis...`, 50);
+            
+            // Determine the correct endpoint based on analysis type
+            const endpoints = {
+                'exercise': '/process_exercise_analysis',
+                'motion_capture': '/process_motion_capture_analysis'
+            };
+            
+            const endpoint = endpoints[currentAnalysisType];
+            if (!endpoint) {
+                hideProgress();
+                showAlert('Unknown analysis type: ' + currentAnalysisType, 'danger');
+                return;
+            }
+            
+            // Send analysis request
+            fetch(endpoint, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    filename: currentFilename,
+                    bbox: selectedBbox
+                })
+            })
+            .then(response => response.json())
+            .then(result => {
+                if (result.error) {
+                    hideProgress();
+                    showAlert('Analysis failed: ' + result.error, 'danger');
+                    return;
+                }
+                
+                showProgress(`${currentAnalysisType} analysis complete!`, 100);
+                
+                setTimeout(() => {
+                    hideProgress();
+                    showResults(result);
+                    
+                    // Close modal
+                    const modal = bootstrap.Modal.getInstance(document.getElementById('playerSelectionModal'));
+                    modal.hide();
+                }, 1000);
+            })
+            .catch(error => {
+                hideProgress();
+                showAlert('Analysis failed: ' + error, 'danger');
+            });
+        });
+
+        function showAlert(message, type) {
+            const alertDiv = document.createElement('div');
+            alertDiv.className = `alert alert-${type} alert-dismissible fade show`;
+            alertDiv.innerHTML = `
+                ${message}
+                <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+            `;
+            
+            // Insert at the top of the main container
+            const mainContainer = document.querySelector('.main-container');
+            mainContainer.insertBefore(alertDiv, mainContainer.firstChild);
+            
+            // Auto-remove after 5 seconds
+            setTimeout(() => {
+                if (alertDiv.parentNode) {
+                    alertDiv.remove();
+                }
+            }, 5000);
+        }
+
+        function formatFileSize(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        }
+
+        // Test function for debugging modal
+        function testModal() {
+            console.log('Testing player detection modal...');
+            
+            // Create fake detected players for testing
+            window.detectedPlayers = [
+                {
+                    id: 0,
+                    bbox: [100, 100, 150, 200],
+                    confidence: 0.85
+                },
+                {
+                    id: 1,
+                    bbox: [300, 150, 120, 180],
+                    confidence: 0.92
+                },
+                {
+                    id: 2,
+                    bbox: [500, 200, 140, 190],
+                    confidence: 0.78
+                }
+            ];
+            
+            // Create a fake video frame for testing
+            const canvas = document.getElementById('playerSelectionCanvas');
+            const ctx = canvas.getContext('2d');
+            
+            // Set canvas size
+            canvas.width = 800;
+            canvas.height = 600;
+            
+            // Create a simple test frame
+            ctx.fillStyle = '#333';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            ctx.fillStyle = '#fff';
+            ctx.font = '24px Arial';
+            ctx.fillText('Test Video Frame with Players', canvas.width/2 - 150, canvas.height/2);
+            
+            // Create a fake image object
+            currentVideoFrame = {
+                width: canvas.width,
+                height: canvas.height
+            };
+            
+            console.log('Test canvas size:', canvas.width, 'x', canvas.height);
+            console.log('Test players:', window.detectedPlayers);
+            
+            // Setup event listeners for player selection
+            setupPlayerSelectionListeners();
+            
+            // Draw player outlines
+            drawPlayerOutlines();
+            
+            // Update instructions
+            document.getElementById('selectionInstructions').innerHTML = 
+                `<i class="fas fa-hand-pointer me-2"></i>Click on any player outline to select them (${window.detectedPlayers.length} players detected)`;
+            
+            showPlayerSelectionModal('test_video.mp4', 'skeleton');
+        }
+        
+        // Memory management functions
+        function checkMemory() {
+            fetch('/memory_status')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        showAlert(`Memory Usage: ${data.memory_mb} MB (${data.memory_percent.toFixed(1)}%)`, 'info');
+                    } else {
+                        showAlert('Failed to check memory: ' + data.error, 'danger');
+                    }
+                })
+                .catch(error => {
+                    showAlert('Error checking memory: ' + error, 'danger');
+                });
+        }
+        
+        function forceCleanup() {
+            showAlert('Cleaning up memory...', 'info');
+            fetch('/force_cleanup')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        showAlert('Memory cleanup completed!', 'success');
+                        // Check memory again after cleanup
+                        setTimeout(checkMemory, 1000);
+                    } else {
+                        showAlert('Cleanup failed: ' + data.error, 'danger');
+                    }
+                })
+                .catch(error => {
+                    showAlert('Error during cleanup: ' + error, 'danger');
+                });
+        }
+    </script>
+</body>
+</html>

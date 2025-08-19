@@ -1,0 +1,2058 @@
+from flask import Flask, render_template, request, jsonify, send_file
+import os
+import cv2
+import numpy as np
+import pandas as pd
+import mediapipe as mp
+import matplotlib
+matplotlib.use('Agg')  # Use non-interactive backend to avoid threading issues
+import matplotlib.pyplot as plt
+import matplotlib.patches as patches
+import json
+import tempfile
+import shutil
+import base64
+from werkzeug.utils import secure_filename
+import subprocess
+import sys
+from pathlib import Path
+import time
+import math
+
+# Import Inference Pipeline for custom hockey player detection
+try:
+    from roboflow_detector import get_inference_detector, InferencePlayerDetector
+    INFERENCE_AVAILABLE = True
+    print("✅ Inference Pipeline custom model available")
+except ImportError:
+    INFERENCE_AVAILABLE = False
+    print("Warning: Inference Pipeline not available. Install with: pip install inference")
+
+# Import ByteTracker for fallback tracking
+try:
+    from ultralytics import YOLO
+    from onemetric.cv.utils.iou import box_iou_batch
+    from dataclasses import dataclass
+    from typing import Dict, List, Optional, Tuple
+    import supervision as sv
+    BYTETRACKER_AVAILABLE = True
+except ImportError:
+    BYTETRACKER_AVAILABLE = False
+    print("Warning: ByteTracker not available. Install with: pip install ultralytics supervision")
+
+app = Flask(__name__)
+print("🚀 FLASK APP STARTING WITH PERFORMANCE OPTIMIZATIONS! 🚀")
+print("   Debug mode disabled for speed, threaded for efficiency")
+app.config['MAX_CONTENT_LENGTH'] = 100 * 1024 * 1024  # Reduced to 100MB for better performance
+app.config['UPLOAD_FOLDER'] = 'uploads'
+app.config['OUTPUT_FOLDER'] = 'outputs'
+
+# Ensure directories exist
+os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
+os.makedirs(app.config['OUTPUT_FOLDER'], exist_ok=True)
+
+# Allowed file extensions
+ALLOWED_EXTENSIONS = {'mp4', 'avi', 'mov', 'mkv'}
+
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+# Initialize MediaPipe
+mp_pose = mp.solutions.pose
+
+# Global variables for player selection (with memory management)
+selected_player_data = {}
+import gc  # Garbage collector for memory management
+
+# Performance optimization: Clear memory periodically
+def clear_memory():
+    """Clear memory to prevent slowdowns"""
+    gc.collect()
+    if 'currentVideoFrame' in globals():
+        del globals()['currentVideoFrame']
+    
+    # Force garbage collection more aggressively
+    for i in range(3):
+        gc.collect()
+    
+    # Clear any large objects that might be cached
+    import sys
+    if hasattr(sys, 'exc_clear'):
+        sys.exc_clear()
+
+# Memory monitoring
+import psutil
+def log_memory_usage():
+    """Log current memory usage"""
+    process = psutil.Process()
+    memory_info = process.memory_info()
+    print(f"💾 Memory usage: {memory_info.rss / 1024 / 1024:.1f} MB")
+
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    if 'video' not in request.files:
+        return jsonify({'error': 'No video file provided'}), 400
+    
+    file = request.files['video']
+    if file.filename == '':
+        return jsonify({'error': 'No file selected'}), 400
+    
+    if file and allowed_file(file.filename):
+        filename = secure_filename(file.filename)
+        filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+        file.save(filepath)
+        
+        return jsonify({
+            'success': True,
+            'filename': filename,
+            'filepath': filepath
+        })
+    
+    return jsonify({'error': 'Invalid file type'}), 400
+
+@app.route('/analyze', methods=['POST'])
+def analyze_video():
+    data = request.get_json()
+    analysis_type = data.get('analysis_type')
+    filename = data.get('filename')
+    
+    if not filename:
+        return jsonify({'error': 'No filename provided'}), 400
+    
+    filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    
+    if not os.path.exists(filepath):
+        return jsonify({'error': 'File not found'}), 404
+    
+    try:
+        if analysis_type == 'skeleton':
+            result = analyze_skeleton(filepath, filename)
+        elif analysis_type == 'goalie':
+            result = analyze_goalie(filepath, filename)
+        elif analysis_type == 'motion_capture':
+            result = analyze_motion_capture(filepath, filename)
+        elif analysis_type == 'speed':
+            result = analyze_speed(filepath, filename)
+        else:
+            return jsonify({'error': 'Invalid analysis type'}), 400
+        
+        return jsonify(result)
+    
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+def analyze_goalie(video_path, filename):
+    """Goalie biomechanics analysis"""
+    output_video = f"goalie_annotated_{filename}"
+    output_csv = f"goalie_metrics_{filename.replace('.mp4', '.csv')}"
+    
+    output_video_path = os.path.join(app.config['OUTPUT_FOLDER'], output_video)
+    output_csv_path = os.path.join(app.config['OUTPUT_FOLDER'], output_csv)
+    
+    # Initialize MediaPipe
+    pose = mp_pose.Pose(min_detection_confidence=0.7, min_tracking_confidence=0.7)
+    
+    # Video setup
+    cap = cv2.VideoCapture(video_path)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
+    
+    joint_data = []
+    
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = pose.process(rgb_frame)
+        
+        if results.pose_landmarks:
+            landmark_positions = {'frame': len(joint_data) + 1}
+            
+            for id, landmark in enumerate(results.pose_landmarks.landmark):
+                joint_name = mp_pose.PoseLandmark(id).name.lower()
+                landmark_positions[f'{joint_name}_x'] = landmark.x
+                landmark_positions[f'{joint_name}_y'] = landmark.y
+                
+                # Draw joints
+                x = int(landmark.x * width)
+                y = int(landmark.y * height)
+                cv2.circle(frame, (x, y), 5, (0, 255, 0), -1)
+            
+            # Draw pose connections
+            mp.solutions.drawing_utils.draw_landmarks(
+                frame, results.pose_landmarks, mp_pose.POSE_CONNECTIONS,
+                mp.solutions.drawing_utils.DrawingSpec(color=(0, 0, 255), thickness=2, circle_radius=2),
+                mp.solutions.drawing_utils.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=2)
+            )
+            
+            joint_data.append(landmark_positions)
+        
+        out.write(frame)
+    
+    cap.release()
+    out.release()
+    pose.close()
+    
+    # Analyze goalie metrics
+    joint_df = pd.DataFrame(joint_data)
+    joint_df = analyze_goalie_metrics(joint_df, fps, width)
+    joint_df.to_csv(output_csv_path, index=False)
+    
+    return {
+        'success': True,
+        'analysis_id': 'goalie',
+        'analysis_type': 'goalie',
+        'message': 'Goalie analysis completed successfully',
+        'results': [
+            {
+                'name': output_video,
+                'type': 'video',
+                'description': 'Annotated video with goalie pose tracking',
+                'preview': True,
+                'download': True
+            },
+            {
+                'name': output_csv,
+                'type': 'csv',
+                'description': 'Goalie biomechanical metrics data',
+                'preview': False,
+                'download': True
+            }
+        ]
+    }
+
+def analyze_skeleton(video_path, filename):
+    """Skeleton analysis - pose tracking with colored joint overlay"""
+    output_video = f"skeleton_{filename}"
+    output_csv = f"skeleton_metrics_{filename.replace('.mp4', '.csv')}"
+    
+    output_video_path = os.path.join(app.config['OUTPUT_FOLDER'], output_video)
+    output_csv_path = os.path.join(app.config['OUTPUT_FOLDER'], output_csv)
+    
+    # Initialize MediaPipe
+    pose = mp_pose.Pose(min_detection_confidence=0.7, min_tracking_confidence=0.7)
+    
+    # Video setup
+    cap = cv2.VideoCapture(video_path)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(output_video_path, fourcc, fps, (width, height))
+    
+    joint_data = []
+    
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = pose.process(rgb_frame)
+        
+        if results.pose_landmarks:
+            landmark_positions = {'frame': len(joint_data) + 1}
+            
+            for id, landmark in enumerate(results.pose_landmarks.landmark):
+                joint_name = mp_pose.PoseLandmark(id).name.lower()
+                landmark_positions[f'{joint_name}_x'] = landmark.x
+                landmark_positions[f'{joint_name}_y'] = landmark.y
+                
+                # Draw joints
+                x = int(landmark.x * width)
+                y = int(landmark.y * height)
+                cv2.circle(frame, (x, y), 5, (0, 255, 0), -1)
+            
+            # Draw pose connections
+            mp.solutions.drawing_utils.draw_landmarks(
+                frame, results.pose_landmarks, mp_pose.POSE_CONNECTIONS,
+                mp.solutions.drawing_utils.DrawingSpec(color=(0, 0, 255), thickness=2, circle_radius=2),
+                mp.solutions.drawing_utils.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=2)
+            )
+            
+            joint_data.append(landmark_positions)
+        
+        out.write(frame)
+    
+    cap.release()
+    out.release()
+    pose.close()
+    
+    # Save joint data
+    if joint_data:
+        joint_df = pd.DataFrame(joint_data)
+        joint_df.to_csv(output_csv_path, index=False)
+    
+    return {
+        'success': True,
+        'analysis_id': 'skeleton',
+        'analysis_type': 'skeleton',
+        'message': 'Skeleton analysis completed successfully',
+        'results': [
+            {
+                'name': output_video,
+                'type': 'video',
+                'description': 'Annotated video with skeleton overlay',
+                'preview': True,
+                'download': True
+            },
+            {
+                'name': output_csv,
+                'type': 'csv',
+                'description': 'Skeleton joint position data',
+                'preview': False,
+                'download': True
+            }
+        ]
+    }
+
+def analyze_speed(video_path, filename):
+    """Player speed analysis - track player speed and acceleration"""
+    output_csv = f"speed_metrics_{filename.replace('.mp4', '.csv')}"
+    output_csv_path = os.path.join(app.config['OUTPUT_FOLDER'], output_csv)
+    
+    # Initialize MediaPipe
+    pose = mp_pose.Pose(min_detection_confidence=0.7, min_tracking_confidence=0.7)
+    
+    # Video setup
+    cap = cv2.VideoCapture(video_path)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    
+    joint_data = []
+    frame_index = 0
+    
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        frame_index += 1
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = pose.process(rgb_frame)
+        
+        if results.pose_landmarks:
+            # Calculate center of mass for speed tracking
+            left_hip = results.pose_landmarks.landmark[mp_pose.PoseLandmark.LEFT_HIP]
+            right_hip = results.pose_landmarks.landmark[mp_pose.PoseLandmark.RIGHT_HIP]
+            
+            com_x = (left_hip.x + right_hip.x) / 2
+            com_y = (left_hip.y + right_hip.y) / 2
+            
+            landmark_positions = {
+                'frame': frame_index,
+                'com_x': com_x,
+                'com_y': com_y,
+                'timestamp': frame_index / fps
+            }
+            
+            joint_data.append(landmark_positions)
+    
+    cap.release()
+    pose.close()
+    
+    # Calculate speed metrics
+    if len(joint_data) > 1:
+        df = pd.DataFrame(joint_data)
+        
+        # Calculate displacement and speed
+        df['displacement'] = np.sqrt(
+            (df['com_x'].diff() * width) ** 2 + 
+            (df['com_y'].diff() * height) ** 2
+        )
+        df['speed_px_s'] = df['displacement'] * fps
+        df['speed_kmh'] = df['speed_px_s'] * 3.6  # Rough conversion
+        df['speed_mph'] = df['speed_kmh'] * 0.621371
+        
+        df.to_csv(output_csv_path, index=False)
+    
+    return {
+        'success': True,
+        'analysis_id': 'speed',
+        'analysis_type': 'speed',
+        'message': 'Speed analysis completed successfully',
+        'results': [
+            {
+                'name': output_csv,
+                'type': 'csv',
+                'description': 'Player speed metrics data',
+                'preview': False,
+                'download': True
+            }
+        ]
+    }
+
+def analyze_goalie_metrics(joint_df, fps, width):
+    """Analyze goalie-specific metrics"""
+    joint_df = calculate_center_of_mass(joint_df, width)
+    
+    joint_df['glove_hand_velocity'] = calculate_velocity(joint_df, 'right_wrist_x', 'right_wrist_y', fps, width)
+    joint_df['stick_hand_velocity'] = calculate_velocity(joint_df, 'left_wrist_x', 'left_wrist_y', fps, width)
+    joint_df['center_of_mass_velocity'] = calculate_velocity(joint_df, 'com_x', 'com_y', fps, width)
+    
+    joint_df['leg_extension_angle'] = calculate_angle(joint_df, 'left_hip', 'left_knee', 'left_ankle', width)
+    joint_df['glove_hand_angle'] = calculate_angle(joint_df, 'right_shoulder', 'right_elbow', 'right_wrist', width)
+    joint_df['posture_angle'] = calculate_angle(joint_df, 'left_shoulder', 'left_hip', 'left_knee', width)
+    
+    return joint_df
+
+def calculate_center_of_mass(joint_df, width):
+    """Calculate the approximate center of mass using key body parts."""
+    x_cols = ['left_hip_x', 'right_hip_x', 'left_shoulder_x', 'right_shoulder_x']
+    y_cols = ['left_hip_y', 'right_hip_y', 'left_shoulder_y', 'right_shoulder_y']
+    joint_df['com_x'] = joint_df[x_cols].mean(axis=1)
+    joint_df['com_y'] = joint_df[y_cols].mean(axis=1)
+    return joint_df
+
+def calculate_velocity(joint_df, x_col, y_col, fps, width):
+    """Calculate the velocity of a joint over time using changes in x and y positions."""
+    import numpy as np
+    displacement = np.sqrt((joint_df[x_col].diff()) ** 2 + (joint_df[y_col].diff()) ** 2)
+    time_interval = 1 / fps
+    velocity = displacement / time_interval
+    velocity.fillna(0, inplace=True)
+    return velocity
+
+def calculate_angle(joint_df, point_a, point_b, point_c, width):
+    """Calculate the angle (in degrees) between three joints: A, B, and C (using cosine rule)"""
+    import numpy as np
+    ax, ay = joint_df[f'{point_a}_x'], joint_df[f'{point_a}_y']
+    bx, by = joint_df[f'{point_b}_x'], joint_df[f'{point_b}_y']
+    cx, cy = joint_df[f'{point_c}_x'], joint_df[f'{point_c}_y']
+
+    ab = np.sqrt((ax - bx) ** 2 + (ay - by) ** 2)
+    bc = np.sqrt((bx - cx) ** 2 + (by - cy) ** 2)
+    ac = np.sqrt((ax - cx) ** 2 + (ay - cy) ** 2)
+
+    denominator = 2 * ab * bc
+    cosine_angle = np.clip((ab ** 2 + bc ** 2 - ac ** 2) / denominator, -1, 1)
+    angle = np.degrees(np.arccos(cosine_angle))
+    return angle
+
+
+
+@app.route('/get_video_frame/<filename>')
+def get_video_frame(filename):
+    """Get first frame of video for player selection"""
+    video_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    
+    if not os.path.exists(video_path):
+        return jsonify({'error': 'Video not found'}), 404
+    
+    cap = cv2.VideoCapture(video_path)
+    ret, frame = cap.read()
+    cap.release()
+    
+    if not ret:
+        return jsonify({'error': 'Could not read video frame'}), 500
+    
+    # Convert frame to base64 for web display
+    _, buffer = cv2.imencode('.jpg', frame)
+    frame_base64 = base64.b64encode(buffer).decode('utf-8')
+    
+    return jsonify({
+        'frame': frame_base64,
+        'width': frame.shape[1],
+        'height': frame.shape[0]
+    })
+
+@app.route('/test_roboflow')
+def test_roboflow():
+    """Test endpoint to check if Roboflow model is working"""
+    try:
+        print("🧪 Testing Roboflow model connection...")
+        
+        if not INFERENCE_AVAILABLE:
+            return jsonify({
+                'error': 'Inference Pipeline not available',
+                'INFERENCE_AVAILABLE': INFERENCE_AVAILABLE
+            }), 500
+        
+        detector = get_inference_detector()
+        print(f"✅ Detector created: {type(detector)}")
+        
+        # Create a simple test image
+        test_frame = np.ones((480, 640, 3), dtype=np.uint8) * 128  # Gray image
+        cv2.rectangle(test_frame, (100, 100), (300, 400), (255, 255, 255), -1)  # White rectangle
+        
+        print(f"🧪 Testing with simple frame: {test_frame.shape}")
+        players = detector.detect_players_in_frame(test_frame)
+        
+        return jsonify({
+            'success': True,
+            'INFERENCE_AVAILABLE': INFERENCE_AVAILABLE,
+            'detector_type': str(type(detector)),
+            'test_frame_shape': test_frame.shape,
+            'players_detected': len(players),
+            'players': players
+        })
+        
+    except Exception as e:
+        print(f"❌ Roboflow test failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({
+            'error': str(e),
+            'INFERENCE_AVAILABLE': INFERENCE_AVAILABLE,
+            'traceback': traceback.format_exc()
+        }), 500
+
+@app.route('/detect_players/<filename>')
+def detect_players(filename):
+    """Detect all players/people in the first frame of the video"""
+    video_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    
+    if not os.path.exists(video_path):
+        return jsonify({'error': 'Video not found'}), 404
+    
+    cap = cv2.VideoCapture(video_path)
+    ret, frame = cap.read()
+    cap.release()
+    
+    if not ret:
+        return jsonify({'error': 'Could not read video frame'}), 500
+    
+    # Performance optimization: Resize frame to reduce memory usage
+    height, width = frame.shape[:2]
+    if width > 640:  # Reduced from 800 to 640 for better performance
+        scale = 640 / width
+        new_width = int(width * scale)
+        new_height = int(height * scale)
+        frame = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_AREA)
+    
+    # Convert frame to base64 for web display (with compression)
+    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 70]  # Reduced from 85% to 70% for smaller size
+    _, buffer = cv2.imencode('.jpg', frame, encode_param)
+    frame_base64 = base64.b64encode(buffer).decode('utf-8')
+    
+    # Log memory usage
+    log_memory_usage()
+    
+    # FAST FALLBACK: Use YOLO detection instead of slow Roboflow for player selection
+    players = []
+    
+    print(f"🎯 Starting FAST player detection...")
+    print(f"   Frame size: {frame.shape[1]}x{frame.shape[0]}")
+    print(f"   Using YOLO fallback for speed")
+    
+    if BYTETRACKER_AVAILABLE:
+        try:
+            print(f"   Loading YOLO model for fast detection...")
+            model = YOLO('yolov8n.pt')
+            print(f"   YOLO model loaded successfully")
+            
+            print(f"   Running YOLO detection...")
+            results = model(frame, verbose=False)
+            
+            if results and len(results) > 0:
+                boxes = results[0].boxes.xyxy.cpu().numpy()
+                confidences = results[0].boxes.conf.cpu().numpy()
+                classes = results[0].boxes.cls.cpu().numpy()
+                
+                for i, (box, conf, cls) in enumerate(zip(boxes, confidences, classes)):
+                    # Only include person class (class 0) with reasonable confidence
+                    if cls == 0 and conf > 0.3:  # Person class with 30%+ confidence
+                        x1, y1, x2, y2 = box
+                        players.append({
+                            'id': i,
+                            'bbox': [int(x1), int(y1), int(x2 - x1), int(y2 - y1)],
+                            'confidence': float(conf),
+                            'type': 'person'
+                        })
+                
+                print(f"🎯 YOLO detected {len(players)} people for player selection")
+            else:
+                print(f"⚠️  YOLO detection returned no results")
+                
+        except Exception as e:
+            print(f"❌ YOLO detection error: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    # Clear memory after processing
+    clear_memory()
+    
+    return jsonify({
+        'frame': frame_base64,
+        'width': frame.shape[1],
+        'height': frame.shape[0],
+        'players': players
+    })
+
+
+@app.route('/detect_yolo/<filename>')
+def detect_yolo(filename):
+    """Detect people using YOLO model for general person detection"""
+    video_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    
+    if not os.path.exists(video_path):
+        return jsonify({'error': 'Video not found'}), 404
+    
+    cap = cv2.VideoCapture(video_path)
+    ret, frame = cap.read()
+    cap.release()
+    
+    if not ret:
+        return jsonify({'error': 'Could not read video frame'}), 500
+    
+    # Performance optimization: Resize frame to reduce memory usage
+    height, width = frame.shape[:2]
+    if width > 640:  # Reduced from 800 to 640 for better performance
+        scale = 640 / width
+        new_width = int(width * scale)
+        new_height = int(height * scale)
+        frame = cv2.resize(frame, (new_width, new_height), interpolation=cv2.INTER_AREA)
+    
+    # Convert frame to base64 for web display (with compression)
+    encode_param = [int(cv2.IMWRITE_JPEG_QUALITY), 70]  # Reduced from 85% to 70% for smaller size
+    _, buffer = cv2.imencode('.jpg', frame, encode_param)
+    frame_base64 = base64.b64encode(buffer).decode('utf-8')
+    
+    # Log memory usage
+    log_memory_usage()
+    
+    # Detect people using YOLO model
+    people = []
+    
+    print(f"🎯 Starting YOLO person detection...")
+    print(f"   Frame size: {frame.shape[1]}x{frame.shape[0]}")
+    print(f"   BYTETRACKER_AVAILABLE: {BYTETRACKER_AVAILABLE}")
+    
+    if BYTETRACKER_AVAILABLE:
+        try:
+            print(f"   Loading YOLO model...")
+            model = YOLO('yolov8n.pt')
+            print(f"   YOLO model loaded successfully")
+            
+            print(f"   Running YOLO detection...")
+            results = model(frame, verbose=False)
+            
+            if results and len(results) > 0:
+                boxes = results[0].boxes.xyxy.cpu().numpy()
+                confidences = results[0].boxes.conf.cpu().numpy()
+                classes = results[0].boxes.cls.cpu().numpy()
+                
+                for i, (box, conf, cls) in enumerate(zip(boxes, confidences, classes)):
+                    # Only include person class (class 0) with reasonable confidence
+                    if cls == 0 and conf > 0.3:  # Person class with 30%+ confidence
+                        x1, y1, x2, y2 = box
+                        people.append({
+                            'id': i,
+                            'bbox': [int(x1), int(y1), int(x2 - x1), int(y2 - y1)],
+                            'confidence': float(conf),
+                            'type': 'person'
+                        })
+                
+                print(f"🎯 YOLO detected {len(people)} people")
+            else:
+                print(f"⚠️  YOLO detection returned no results")
+                
+        except Exception as e:
+            print(f"❌ YOLO detection error: {e}")
+            import traceback
+            traceback.print_exc()
+    else:
+        print("❌ YOLO model not available")
+    
+    # Clear memory after processing
+    clear_memory()
+    
+    return jsonify({
+        'frame': frame_base64,
+        'width': frame.shape[1],
+        'height': frame.shape[0],
+        'people': people
+    })
+
+
+@app.route('/clear_memory')
+def clear_memory_endpoint():
+    """Clear memory to improve performance"""
+    try:
+        clear_memory()
+        log_memory_usage()
+        return jsonify({'success': True, 'message': 'Memory cleared successfully'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/memory_status')
+def memory_status():
+    """Get current memory usage"""
+    try:
+        process = psutil.Process()
+        memory_info = process.memory_info()
+        return jsonify({
+            'success': True,
+            'memory_mb': round(memory_info.rss / 1024 / 1024, 1),
+            'memory_percent': process.memory_percent()
+        })
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+@app.route('/force_cleanup')
+def force_cleanup():
+    """Force aggressive memory cleanup"""
+    try:
+        # Force garbage collection multiple times
+        for i in range(5):
+            gc.collect()
+        
+        # Clear any cached objects
+        if hasattr(sys, 'exc_clear'):
+            sys.exc_clear()
+        
+        # Log final memory usage
+        log_memory_usage()
+        
+        return jsonify({'success': True, 'message': 'Aggressive cleanup completed'})
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+
+
+def _init_tracker_and_model(frame, bbox):
+    """Helper to initialize tracker/model based on availability."""
+    if BYTETRACKER_AVAILABLE:
+        return {'use_yolo': True, 'model': YOLO('yolov8n.pt'), 'selected_id': None, 'init_bbox': bbox}
+    # Fallback to MIL
+    tracker = cv2.TrackerMIL_create()
+    x, y, w, h = bbox
+    tracker.init(frame, (int(x), int(y), int(w), int(h)))
+    return {'use_yolo': False, 'tracker': tracker}
+
+
+def _update_bbox_with_tracking(frame, tracking_ctx):
+    """Update bbox using YOLO+ByteTracker or classic tracker. Returns (ok, bbox)."""
+    if tracking_ctx.get('use_yolo'):
+        model = tracking_ctx['model']
+        init_x, init_y, init_w, init_h = tracking_ctx['init_bbox']
+        results = model.track(frame, persist=True, verbose=False)
+        
+        if results and len(results) > 0 and results[0].boxes is not None and results[0].boxes.xyxy is not None:
+            boxes = results[0].boxes.xyxy.cpu().numpy()
+            clss = results[0].boxes.cls.cpu().numpy() if results[0].boxes.cls is not None else None
+            ids = results[0].boxes.id.cpu().numpy() if results[0].boxes.id is not None else None
+            
+            # STRICT: Only track person class (COCO class 0), ignore everything else
+            person_idxs = []
+            for i in range(len(boxes)):
+                if clss is None or clss[i] == 0:  # Person class only
+                    # Additional safety check: ensure reasonable person dimensions
+                    x1, y1, x2, y2 = boxes[i]
+                    w, h = x2 - x1, y2 - y1
+                    aspect_ratio = w / h if h > 0 else 0
+                    # Person should have reasonable aspect ratio (not too wide or tall)
+                    if 0.3 < aspect_ratio < 2.0 and w > 20 and h > 40:  # Minimum size thresholds
+                        person_idxs.append(i)
+            
+            if len(person_idxs) == 0:
+                # No valid persons detected - return False but keep the selected_id
+                return False, None
+                
+            if tracking_ctx['selected_id'] is None and ids is not None:
+                # First time: Pick detection closest to initial bbox center
+                sel_cx, sel_cy = init_x + init_w / 2.0, init_y + init_h / 2.0
+                min_d, sel_id = 1e9, None
+                for i in person_idxs:
+                    x1, y1, x2, y2 = boxes[i]
+                    cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+                    d = (cx - sel_cx) ** 2 + (cy - sel_cy) ** 2
+                    if d < min_d:
+                        min_d = d
+                        sel_id = ids[i] if ids is not None else None
+                tracking_ctx['selected_id'] = sel_id
+                print(f"🔒 LOCKED ON Player ID: {sel_id} for initial bbox: {init_x}, {init_y}, {init_w}, {init_h}")
+            
+            # CRITICAL: Only track the selected player ID, NEVER switch to others
+            chosen_idx = None
+            if ids is not None and tracking_ctx['selected_id'] is not None:
+                # Look for our specific selected player ID
+                for i in person_idxs:
+                    if ids[i] == tracking_ctx['selected_id']:
+                        chosen_idx = i
+                        break
+                
+                if chosen_idx is not None:
+                    print(f"✅ Tracking LOCKED player ID: {tracking_ctx['selected_id']}")
+                else:
+                    print(f"⚠️  Selected player ID {tracking_ctx['selected_id']} not found - maintaining last known position")
+                    # Return last known bbox if we have it, otherwise False
+                    if 'last_bbox' in tracking_ctx and tracking_ctx['last_bbox'] is not None:
+                        return True, tracking_ctx['last_bbox']
+                    return False, None
+            
+            # If we found our selected player, update the bbox
+            if chosen_idx is not None:
+                x1, y1, x2, y2 = boxes[chosen_idx]
+                bbox = (int(x1), int(y1), int(x2 - x1), int(y2 - y1))
+                tracking_ctx['last_bbox'] = bbox
+                return True, bbox
+            
+            # Fallback: if no IDs available, use nearest to last known position
+            if ids is None and 'last_bbox' in tracking_ctx and tracking_ctx['last_bbox'] is not None:
+                last_x, last_y, last_w, last_h = tracking_ctx['last_bbox']
+                ref_cx, ref_cy = last_x + last_w / 2.0, last_y + last_h / 2.0
+                min_d, chosen_idx = 1e9, None
+                for i in person_idxs:
+                    x1, y1, x2, y2 = boxes[i]
+                    cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+                    d = (cx - ref_cx) ** 2 + (cy - ref_cy) ** 2
+                    if d < min_d:
+                        min_d = d
+                        chosen_idx = i
+                if chosen_idx is not None:
+                    x1, y1, x2, y2 = boxes[chosen_idx]
+                    bbox = (int(x1), int(y1), int(x2 - x1), int(y2 - y1))
+                    tracking_ctx['last_bbox'] = bbox
+                    return True, bbox
+            
+            return False, None
+        return False, None
+    else:
+        # Fallback to MIL tracker
+        ok, bbox = tracking_ctx['tracker'].update(frame)
+        if ok:
+            bbox = (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3]))
+            tracking_ctx['last_bbox'] = bbox
+            return True, bbox
+        return False, None
+
+
+def _run_pose_on_roi(frame, bbox, pose, width, height):
+    """Run MediaPipe pose on ROI and return landmarks mapped to full-frame pixel coords."""
+    x, y, w, h = [int(v) for v in bbox]
+    x = max(0, x)
+    y = max(0, y)
+    w = max(1, min(w, width - x))
+    h = max(1, min(h, height - y))
+    roi = frame[y:y+h, x:x+w]
+    if roi.size == 0:
+        return None, None
+    rgb_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2RGB)
+    results = pose.process(rgb_roi)
+    if not results.pose_landmarks:
+        return None, None
+    landmarks = results.pose_landmarks.landmark
+    # Map ROI-normalized coords back to full-frame pixel coords
+    pts = []
+    for lm in landmarks:
+        px = int(lm.x * w) + x
+        py = int(lm.y * h) + y
+        pts.append((px, py))
+    return pts, results
+
+
+
+
+
+
+@app.route('/process_motion_capture_analysis', methods=['POST'])
+def process_motion_capture_analysis():
+    """Process off-ice analysis with selected person coordinates"""
+    data = request.get_json()
+    filename = data.get('filename')
+    bbox = data.get('bbox')
+    
+    if not filename or not bbox:
+        return jsonify({'error': 'Missing filename or bounding box'}), 400
+    
+    video_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+    base_name = os.path.splitext(filename)[0]
+    output_csv = f"off_ice_metrics_{base_name}.csv"
+    output_video = f"off_ice_analysis_{filename}"
+    output_skeleton = f"off_ice_skeleton_{base_name}.mp4"
+    
+    output_csv_path = os.path.join(app.config['OUTPUT_FOLDER'], output_csv)
+    output_video_path = os.path.join(app.config['OUTPUT_FOLDER'], output_video)
+    output_skeleton_path = os.path.join(app.config['OUTPUT_FOLDER'], output_skeleton)
+    
+    try:
+        result = process_motion_capture_tracking(video_path, bbox, output_csv_path, output_video_path, output_skeleton_path)
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+    """Enhanced speed tracking with ByteTracker and better player selection"""
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    # Initialize MediaPipe pose detection
+    pose = mp_pose.Pose(min_detection_confidence=0.7, min_tracking_confidence=0.7)
+    
+    # Initialize ByteTracker if available, otherwise use MIL tracker
+    if BYTETRACKER_AVAILABLE:
+        tracker = None  # Will use YOLO + ByteTracker
+        model = YOLO('yolov8n.pt')  # Load YOLO model for detection
+    else:
+        tracker = cv2.TrackerMIL_create()
+    
+    # Read first frame and initialize tracker
+    ret, frame = cap.read()
+    if not ret:
+        raise Exception("Could not read video")
+    
+    # Initialize tracker with selected bbox
+    x, y, w, h = bbox
+    if not BYTETRACKER_AVAILABLE:
+        tracker.init(frame, (x, y, w, h))
+    
+    # Setup video writer
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(video_path_out, fourcc, fps, (width, height))
+    
+    speeds = []
+    previous_center = None
+    frame_count = 0
+    selected_player_id = None
+    joint_data = []  # Store pose data for skeleton generation
+    
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        frame_count += 1
+        ok = False  # Initialize ok variable
+        
+        if BYTETRACKER_AVAILABLE:
+            # Use YOLO + ByteTracker for better tracking
+            results = model.track(frame, persist=True, verbose=False)
+            
+            if results[0].boxes.id is not None:
+                boxes = results[0].boxes.xyxy.cpu().numpy()
+                track_ids = results[0].boxes.id.cpu().numpy()
+                
+                # Find the closest detection to our selected bbox
+                if selected_player_id is None:
+                    # Find the detection closest to our initial selection
+                    min_distance = float('inf')
+                    for i, box in enumerate(boxes):
+                        box_center = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+                        selected_center = (x + w/2, y + h/2)
+                        distance = math.sqrt((box_center[0] - selected_center[0])**2 + 
+                                          (box_center[1] - selected_center[1])**2)
+                        if distance < min_distance:
+                            min_distance = distance
+                            selected_player_id = track_ids[i]
+                
+                # Track the selected player
+                for i, (box, track_id) in enumerate(zip(boxes, track_ids)):
+                    if track_id == selected_player_id:
+                        x1, y1, x2, y2 = box
+                        bbox = (int(x1), int(y1), int(x2-x1), int(y2-y1))
+                        ok = True  # Set ok to True when player is tracked
+                        
+                        # Draw bounding box
+                        p1 = (int(bbox[0]), int(bbox[1]))
+                        p2 = (int(bbox[0] + bbox[2]), int(bbox[1] + bbox[3]))
+                        cv2.rectangle(frame, p1, p2, (0, 255, 0), 2)
+                        
+                        # Calculate center
+                        center = (int(bbox[0] + bbox[2] / 2), int(bbox[1] + bbox[3] / 2))
+                        cv2.circle(frame, center, 10, (255, 0, 0), 3)
+                        
+                        # Calculate speed
+                        if previous_center is not None:
+                            distance = math.sqrt((center[0] - previous_center[0]) ** 2 + 
+                                              (center[1] - previous_center[1]) ** 2)
+                            speed = distance * fps  # pixels per second
+                            speeds.append(speed)
+                            
+                            # Display speed
+                            speed_kmh = speed * 3.6  # Convert to km/h
+                            cv2.putText(frame, f"Speed: {speed_kmh:.1f} km/h", (10, 30), 
+                                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                        
+                        previous_center = center
+                        
+                        # Add pose detection for skeleton generation
+                        try:
+                            # Convert BGR to RGB for MediaPipe
+                            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                            pose_results = pose.process(rgb_frame)
+                            
+                            # If pose landmarks are detected, extract key points
+                            if pose_results.pose_landmarks:
+                                landmark_positions = {'frame': frame_count}
+                                for id, landmark in enumerate(pose_results.pose_landmarks.landmark):
+                                    joint_name = mp_pose.PoseLandmark(id).name.lower()
+                                    landmark_positions[f'{joint_name}_x'] = landmark.x
+                                    landmark_positions[f'{joint_name}_y'] = landmark.y
+                                
+                                joint_data.append(landmark_positions)
+                        except Exception as e:
+                            print(f"⚠️ Pose detection error in frame {frame_count}: {e}")
+                        
+                        break
+        else:
+            # Use traditional tracker
+            ok, bbox = tracker.update(frame)
+        
+        if ok:
+            # Draw bounding box
+            p1 = (int(bbox[0]), int(bbox[1]))
+            p2 = (int(bbox[0] + bbox[2]), int(bbox[1] + bbox[3]))
+            cv2.rectangle(frame, p1, p2, (0, 255, 0), 2)
+            
+            # Calculate center
+            center = (int(bbox[0] + bbox[2] / 2), int(bbox[1] + bbox[3] / 2))
+            cv2.circle(frame, center, 10, (255, 0, 0), 3)
+            
+            # Calculate speed
+            if previous_center is not None:
+                distance = math.sqrt((center[0] - previous_center[0]) ** 2 + 
+                                  (center[1] - previous_center[1]) ** 2)
+                speed = distance * fps  # pixels per second
+                speeds.append(speed)
+                
+                # Display speed
+                speed_kmh = speed * 3.6  # Convert to km/h
+                cv2.putText(frame, f"Speed: {speed_kmh:.1f} km/h", (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            
+            previous_center = center
+        
+        # Add pose detection for skeleton generation
+        try:
+            # Convert BGR to RGB for MediaPipe
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            pose_results = pose.process(rgb_frame)
+            
+            # If pose landmarks are detected, extract key points
+            if pose_results.pose_landmarks:
+                landmark_positions = {'frame': frame_count}
+                for id, landmark in enumerate(pose_results.pose_landmarks.landmark):
+                    joint_name = mp_pose.PoseLandmark(id).name.lower()
+                    landmark_positions[f'{joint_name}_x'] = landmark.x
+                    landmark_positions[f'{joint_name}_y'] = landmark.y
+                
+                joint_data.append(landmark_positions)
+        except Exception as e:
+            print(f"⚠️ Pose detection error in frame {frame_count}: {e}")
+        
+        out.write(frame)
+    
+    cap.release()
+    out.release()
+    
+    # Save speed data to CSV
+    if speeds:
+        df = pd.DataFrame({
+            'frame': range(1, len(speeds) + 1),
+            'speed_px_s': speeds,
+            'speed_kmh': [s * 3.6 for s in speeds],
+            'speed_mph': [s * 3.6 * 0.621371 for s in speeds]
+        })
+        df.to_csv(csv_path, index=False)
+    
+    # Generate skeleton animation video
+    skeleton_path = None
+    if joint_data:
+        try:
+            print(f"🎬 Generating skeleton animation for speed analysis...")
+            base_filename = os.path.splitext(os.path.basename(video_path))[0]
+            skeleton_path = os.path.join(os.path.dirname(video_path_out), f"skeleton_{base_filename}.mp4")
+            
+            print(f"🚀 Calling generate_live_streaming_skeleton with {len(joint_data)} frames...")
+            skeleton_result = generate_live_streaming_skeleton(video_path, skeleton_path, bbox, fps, width, height)
+            
+            if skeleton_result and os.path.exists(skeleton_path):
+                print(f"✅ Skeleton animation generated successfully!")
+            else:
+                print(f"❌ Skeleton generation failed")
+                skeleton_path = None
+                
+        except Exception as e:
+            print(f"❌ Exception during skeleton generation: {e}")
+            skeleton_path = None
+    
+    # Clean up pose detection
+    pose.close()
+    
+    # Prepare results
+    results = [
+        {
+            'name': os.path.basename(csv_path),
+            'type': 'csv',
+            'description': 'Player speed and acceleration data',
+            'preview': False,
+            'download': True
+        },
+        {
+            'name': os.path.basename(video_path_out),
+            'type': 'video',
+            'description': 'Annotated video with speed tracking',
+            'preview': True,
+            'download': True
+        }
+    ]
+    
+    # Add skeleton video if generated
+    if skeleton_path and os.path.exists(skeleton_path):
+        results.append({
+            'name': os.path.basename(skeleton_path),
+            'type': 'video',
+            'description': 'Speed skeleton animation video',
+            'preview': True,
+            'download': True
+        })
+    
+    return {
+        'success': True,
+        'message': f'Speed analysis completed successfully! Processed {frame_count} frames.',
+        'results': results
+    }
+
+def process_exercise_tracking(video_path, bbox, csv_path, video_path_out):
+    """Process exercise tracking with selected person"""
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    # Initialize MediaPipe
+    pose = mp_pose.Pose(min_detection_confidence=0.7, min_tracking_confidence=0.7)
+    
+    # Setup video writer
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(video_path_out, fourcc, fps, (width, height))
+    
+    joint_data = []
+    frame_count = 0
+    
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        frame_count += 1
+        
+        # Convert BGR to RGB for MediaPipe
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = pose.process(rgb_frame)
+        
+        # If pose landmarks are detected, extract key points
+        if results.pose_landmarks:
+            landmark_positions = {'frame': frame_count}
+            for id, landmark in enumerate(results.pose_landmarks.landmark):
+                joint_name = mp_pose.PoseLandmark(id).name.lower()
+                landmark_positions[f'{joint_name}_x'] = landmark.x
+                landmark_positions[f'{joint_name}_y'] = landmark.y
+                
+                # Draw the joints as circles on the frame
+                x = int(landmark.x * width)
+                y = int(landmark.y * height)
+                cv2.circle(frame, (x, y), 5, (0, 255, 0), -1)  # Green circles for joints
+            
+            # Draw pose connections
+            mp.solutions.drawing_utils.draw_landmarks(
+                frame, results.pose_landmarks, mp_pose.POSE_CONNECTIONS,
+                mp.solutions.drawing_utils.DrawingSpec(color=(0, 0, 255), thickness=2, circle_radius=2),
+                mp.solutions.drawing_utils.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=2)
+            )
+            
+            # Store frame data
+            joint_data.append(landmark_positions)
+        
+        out.write(frame)
+    
+    cap.release()
+    out.release()
+    pose.close()
+    
+    # Save joint positions to CSV
+    if joint_data:
+        joint_df = pd.DataFrame(joint_data)
+        joint_df.to_csv(csv_path, index=False)
+    
+    return {
+        'success': True,
+        'message': 'Exercise analysis completed successfully',
+        'results': [
+            {
+                'name': os.path.basename(csv_path),
+                'type': 'csv',
+                'description': 'Exercise form, range of motion, and biomechanics data',
+                'preview': False,
+                'download': True
+            },
+            {
+                'name': os.path.basename(video_path_out),
+                'type': 'video',
+                'description': 'Annotated video with exercise analysis',
+                'preview': True,
+                'download': True
+            }
+        ]
+    }
+
+def process_motion_capture_tracking(video_path, bbox, csv_path, video_path_out, skeleton_path_out):
+    """Process motion capture tracking with selected person and generate skeleton-only video"""
+    print(f"🎬 STARTING process_motion_capture_tracking:")
+    print(f"   📹 Video: {video_path}")
+    print(f"   📦 BBox: {bbox}")
+    print(f"   📄 CSV: {csv_path}")
+    print(f"   🎥 Video out: {video_path_out}")
+    print(f"   💀 Skeleton out: {skeleton_path_out}")
+    
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS)
+    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    
+    # Initialize MediaPipe
+    pose = mp_pose.Pose(min_detection_confidence=0.7, min_tracking_confidence=0.7)
+    
+    # Setup video writers
+    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+    out = cv2.VideoWriter(video_path_out, fourcc, fps, (width, height))
+    skeleton_out = cv2.VideoWriter(skeleton_path_out, fourcc, fps, (width, height))
+    
+    joint_data = []
+    frame_count = 0
+    
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+        
+        frame_count += 1
+        
+        # Convert BGR to RGB for MediaPipe
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = pose.process(rgb_frame)
+        
+        # If pose landmarks are detected, extract key points
+        if results.pose_landmarks:
+            landmark_positions = {'frame': frame_count}
+            for id, landmark in enumerate(results.pose_landmarks.landmark):
+                joint_name = mp_pose.PoseLandmark(id).name.lower()
+                landmark_positions[f'{joint_name}_x'] = landmark.x
+                landmark_positions[f'{joint_name}_y'] = landmark.y
+                
+                # Draw the joints as circles on the frame
+                x = int(landmark.x * width)
+                y = int(landmark.y * height)
+                cv2.circle(frame, (x, y), 5, (0, 255, 0), -1)  # Green circles for joints
+            
+            # Draw pose connections
+            mp.solutions.drawing_utils.draw_landmarks(
+                frame, results.pose_landmarks, mp_pose.POSE_CONNECTIONS,
+                mp.solutions.drawing_utils.DrawingSpec(color=(0, 0, 255), thickness=2, circle_radius=2),
+                mp.solutions.drawing_utils.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=2)
+            )
+            
+            # Store frame data
+            joint_data.append(landmark_positions)
+            
+            # Generate skeleton-only frame on white gridded background
+            skeleton_frame = create_skeleton_frame(results.pose_landmarks, width, height)
+            skeleton_out.write(skeleton_frame)
+        else:
+            # If no pose detected, write blank white frame with grid
+            skeleton_frame = create_blank_grid_frame(width, height)
+            skeleton_out.write(skeleton_frame)
+        
+        out.write(frame)
+    
+    cap.release()
+    out.release()
+    skeleton_out.release()
+    pose.close()
+    
+    # Initialize results list FIRST - ALWAYS defined regardless of code path
+    results_list = [
+        {
+            'name': os.path.basename(csv_path),
+            'type': 'csv',
+            'description': 'Complete off-ice exercise data with joint trajectories',
+            'preview': False,
+            'download': True
+        },
+        {
+            'name': os.path.basename(video_path_out),
+            'type': 'video',
+            'description': 'Annotated video with off-ice motion tracking',
+            'preview': True,
+            'download': True
+        },
+        {
+            'name': os.path.basename(skeleton_path_out),
+            'type': 'video',
+            'description': 'Skeleton-only video on white gridded background',
+            'preview': True,
+            'download': True
+        }
+    ]
+    
+    # Save joint positions to CSV
+    print(f"🔍 CHECKING joint_data: length = {len(joint_data) if joint_data else 'None/Empty'}")
+    
+    if joint_data:
+        print(f"✅ joint_data exists with {len(joint_data)} frames - proceeding with CSV generation")
+        joint_df = pd.DataFrame(joint_data)
+        joint_df.to_csv(csv_path, index=False)
+        print(f"📊 CSV saved with {len(joint_data)} frames of pose data")
+        print(f"📦 FINAL results list has {len(results_list)} total outputs")
+    else:
+        print(f"⚠️  No pose data collected - CSV generation skipped")
+    
+    return {
+        'success': True,
+        'message': 'Motion capture analysis completed successfully',
+        'results': results_list
+    }
+
+# Helper functions for skeleton video generation
+def create_skeleton_frame(pose_landmarks, width, height):
+    """Create a skeleton-only frame on white gridded background"""
+    # Create white background
+    frame = np.ones((height, width, 3), dtype=np.uint8) * 255
+    
+    # Draw grid lines
+    grid_spacing = 50
+    for x in range(0, width, grid_spacing):
+        cv2.line(frame, (x, 0), (x, height), (200, 200, 200), 1)
+    for y in range(0, height, grid_spacing):
+        cv2.line(frame, (0, y), (width, y), (200, 200, 200), 1)
+    
+    # Draw skeleton connections
+    for connection in mp_pose.POSE_CONNECTIONS:
+        start_idx, end_idx = connection
+        start_landmark = pose_landmarks.landmark[start_idx]
+        end_landmark = pose_landmarks.landmark[end_idx]
+        
+        start_x = int(start_landmark.x * width)
+        start_y = int(start_landmark.y * height)
+        end_x = int(end_landmark.x * width)
+        end_y = int(end_landmark.y * height)
+        
+        cv2.line(frame, (start_x, start_y), (end_x, end_y), (0, 0, 255), 3)
+    
+    # Draw joint circles
+    for landmark in pose_landmarks.landmark:
+        x = int(landmark.x * width)
+        y = int(landmark.y * height)
+        cv2.circle(frame, (x, y), 6, (0, 255, 0), -1)
+    
+    return frame
+
+def create_blank_grid_frame(width, height):
+    """Create a blank white frame with grid lines"""
+    frame = np.ones((height, width, 3), dtype=np.uint8) * 255
+    
+    # Draw grid lines
+    grid_spacing = 50
+    for x in range(0, width, grid_spacing):
+        cv2.line(frame, (x, 0), (x, height), (200, 200, 200), 1)
+    for y in range(0, height, grid_spacing):
+        cv2.line(frame, (0, y), (width, y), (200, 200, 200), 1)
+    
+    return frame
+
+# 3D Skeleton Generation Functions - REMOVED
+# All 3D skeleton functionality has been replaced with simple 2D skeleton generation
+# for improved performance and simplicity
+
+def generate_fast_2d_skeleton_video(pose_data, output_path, fps, width, height):
+    """Generate FAST 2D skeleton animation video - ULTRA FAST MODE"""
+    try:
+        print(f"🚀 ENTER generate_fast_2d_skeleton_video (ULTRA FAST MODE):")
+        print(f"📊 pose_data length: {len(pose_data)}")
+        print(f"📁 output_path: {output_path}")
+        print(f"🎥 fps: {fps}, size: {width}x{height}")
+        
+        # 🚀 ULTRA FAST MODE: Reduce resolution significantly
+        fast_width = min(width, 640)  # Max 640px wide for speed
+        fast_height = int(height * (fast_width / width))
+        print(f"🚀 Ultra fast mode: Reduced resolution from {width}x{height} to {fast_width}x{fast_height}")
+        
+        # Setup video writer for skeleton animation
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+        skeleton_out = cv2.VideoWriter(output_path, fourcc, fps, (fast_width, fast_height))
+        
+        print(f"🎨 Creating FAST 2D skeleton animation frames...")
+        
+        # 🚀 ULTRA FAST MODE: Process only every 3rd frame
+        frame_skip = 3
+        total_frames = len(pose_data)
+        processed_frames = 0
+        
+        print(f"🚀 Ultra fast mode: Processing every {frame_skip} frame(s)")
+        
+        for frame_idx, landmarks in enumerate(pose_data):
+            # Skip frames for speed
+            if frame_idx % frame_skip != 0:
+                continue
+                
+            if processed_frames % 10 == 0:  # Progress update every 10 processed frames
+                print(f"   🚀 Processing frame {frame_idx}/{total_frames} ({(frame_idx/total_frames)*100:.1f}%)")
+            
+            # Create blank frame for skeleton
+            frame = np.ones((fast_height, fast_width, 3), dtype=np.uint8) * 255  # White background
+            
+            if landmarks:
+                # 🚀 ULTRA FAST MODE: Simple 2D skeleton drawing (no 3D model loading)
+                frame = draw_simple_2d_skeleton(frame, landmarks, fast_width, fast_height)
+            else:
+                # If no pose detected, show empty frame
+                frame = create_blank_grid_frame(fast_width, fast_height)
+            
+            skeleton_out.write(frame)
+            processed_frames += 1
+        
+        skeleton_out.release()
+        
+        print(f"🚀 FAST 2D skeleton animation video created!")
+        print(f"   📁 Output: {output_path}")
+        print(f"   🎬 Total frames: {total_frames}")
+        print(f"   🎬 Processed frames: {processed_frames}")
+        print(f"   ⚡ Ultra fast mode: 2D rendering, reduced resolution, frame skipping")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error generating fast 2D skeleton video: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def generate_live_streaming_skeleton(video_path, output_path, bbox, fps, width, height):
+    """Generate skeleton animation using TRUE STREAMING - processes entire video as it plays"""
+    try:
+        print(f"🎬 ENTER generate_live_streaming_skeleton (TRUE STREAMING):")
+        print(f"📁 Video input: {video_path}")
+        print(f"📁 Output: {output_path}")
+        print(f"🎥 fps: {fps}, size: {width}x{height}")
+        
+        # 🎬 TRUE STREAMING: Process entire video, not just preview
+        print(f"🎬 TRUE STREAMING: Processing ENTIRE video file")
+        print(f"   📹 No frame limits - complete video processing")
+        
+        # 🎬 TRUE STREAMING: Optimize resolution for speed while maintaining quality
+        stream_width = min(width, 960)  # Balance between speed and quality
+        stream_height = int(height * (stream_width / width))
+        print(f"🎬 Streaming mode: Optimized resolution from {width}x{height} to {stream_width}x{stream_height}")
+        
+        # 🎬 TRUE STREAMING: Use hardware acceleration when possible
+        try:
+            fourcc = cv2.VideoWriter_fourcc(*'avc1')  # H.264 hardware acceleration
+            skeleton_out = cv2.VideoWriter(output_path, fourcc, fps, (stream_width, stream_height))
+            if not skeleton_out.isOpened():
+                fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+                skeleton_out = cv2.VideoWriter(output_path, fourcc, fps, (stream_width, stream_height))
+                print("⚠️ Hardware acceleration not available, using software encoding")
+            else:
+                print("✅ Using hardware-accelerated H.264 encoding")
+        except:
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
+            skeleton_out = cv2.VideoWriter(output_path, fourcc, fps, (stream_width, stream_height))
+            print("⚠️ Using software MP4V encoding")
+        
+        # 🎬 TRUE STREAMING: Open video and process in real-time
+        cap = cv2.VideoCapture(video_path)
+        pose = mp_pose.Pose(min_detection_confidence=0.6, min_tracking_confidence=0.6)
+        
+        print(f"🎬 Starting TRUE STREAMING skeleton generation...")
+        print(f"   📹 Processing entire video file")
+        print(f"   ⚡ Target: Complete in reasonable time with full video")
+        
+        frame_count = 0
+        start_time = time.time()
+        
+        # 🎬 TRUE STREAMING: Process every frame for complete video
+        # But optimize by processing at reduced resolution
+        print(f"🎬 Streaming mode: Processing every frame at optimized resolution")
+        
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+            
+            frame_count += 1
+            
+            # Progress update every 60 frames (2 seconds at 30fps)
+            if frame_count % 60 == 0:
+                elapsed_time = time.time() - start_time
+                fps_actual = frame_count / elapsed_time
+                print(f"   🎬 Frame {frame_count}: {fps_actual:.1f} fps processing")
+                
+                # Estimate remaining time
+                if fps_actual > 0:
+                    remaining_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) - frame_count
+                    estimated_remaining = remaining_frames / fps_actual
+                    print(f"   ⏱️ Estimated remaining time: {estimated_remaining/60:.1f} minutes")
+            
+            # 🎬 TRUE STREAMING: Optimized frame processing
+            # Resize frame for streaming speed
+            frame_resized = cv2.resize(frame, (stream_width, stream_height))
+            
+            # Convert BGR to RGB for MediaPipe
+            rgb_frame = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2RGB)
+            pose_results = pose.process(rgb_frame)
+            
+            # Create skeleton frame
+            skeleton_frame = np.ones((stream_height, stream_width, 3), dtype=np.uint8) * 255  # White background
+            
+            if pose_results.pose_landmarks:
+                # 🎬 TRUE STREAMING: Generate skeleton frame immediately
+                skeleton_frame = draw_simple_2d_skeleton(skeleton_frame, pose_results.pose_landmarks, stream_width, stream_height)
+            else:
+                # No pose detected, show empty frame
+                skeleton_frame = create_blank_grid_frame(stream_width, stream_height)
+            
+            # 🎬 TRUE STREAMING: Write frame immediately (no buffering)
+            skeleton_out.write(skeleton_frame)
+        
+        # Cleanup
+        cap.release()
+        skeleton_out.release()
+        pose.close()
+        
+        total_time = time.time() - start_time
+        print(f"🎬 TRUE STREAMING skeleton generation completed!")
+        print(f"   📁 Output: {output_path}")
+        print(f"   🎬 Total frames processed: {frame_count}")
+        print(f"   ⏱️ Total time: {total_time:.2f} seconds ({total_time/60:.1f} minutes)")
+        print(f"   🚀 Average processing speed: {frame_count/total_time:.1f} fps")
+        print(f"   ⚡ Performance: TRUE STREAMING - entire video processed")
+        print(f"   📹 Quality: Full video at optimized resolution")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Error in true streaming skeleton generation: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+# draw_3d_skeleton function - REMOVED
+# Replaced with simple 2D skeleton generation for better performance
+
+# draw_3d_skeleton_optimized function - REMOVED
+# Replaced with simple 2D skeleton generation for better performance
+
+def draw_simple_2d_skeleton(frame, pose_landmarks, width, height):
+    """Draw simple 2D skeleton from MediaPipe landmarks - ULTRA FAST MODE"""
+    if not pose_landmarks:
+        return frame
+    
+    try:
+        # 🚀 ULTRA FAST MODE: Simple 2D skeleton drawing from MediaPipe landmarks
+        # Define key connections for basic skeleton (MediaPipe landmark indices)
+        connections = [
+            (0, 1), (0, 2), (1, 3), (2, 4),  # Head
+            (0, 5), (0, 6), (5, 6),  # Shoulders
+            (5, 7), (7, 9), (6, 8), (8, 10),  # Arms
+            (5, 11), (6, 12), (11, 12),  # Hips
+            (11, 13), (13, 15), (12, 14), (14, 16)  # Legs
+        ]
+        
+        # Draw connections (bones)
+        for start_idx, end_idx in connections:
+            if start_idx < len(pose_landmarks.landmark) and end_idx < len(pose_landmarks.landmark):
+                start_landmark = pose_landmarks.landmark[start_idx]
+                end_landmark = pose_landmarks.landmark[end_idx]
+                
+                start_x = int(start_landmark.x * width)
+                start_y = int(start_landmark.y * height)
+                end_x = int(end_landmark.x * width)
+                end_y = int(end_landmark.y * height)
+                
+                # Check bounds
+                if (0 <= start_x < width and 0 <= start_y < height and 
+                    0 <= end_x < width and 0 <= end_y < height):
+                    # Draw bone with thicker line for visibility
+                    cv2.line(frame, (start_x, start_y), (end_x, end_y), (0, 100, 255), 4)
+        
+        # Draw joints (landmarks)
+        for landmark in pose_landmarks.landmark:
+            x = int(landmark.x * width)
+            y = int(landmark.y * height)
+            
+            if 0 <= x < width and 0 <= y < height:
+                # Draw joint with larger circle for visibility
+                cv2.circle(frame, (x, y), 6, (0, 255, 0), -1)
+                # Add black outline for better visibility
+                cv2.circle(frame, (x, y), 6, (0, 0, 0), 2)
+        
+        return frame
+        
+    except Exception as e:
+        print(f"⚠️ Error in simple 2D skeleton drawing: {e}")
+        return frame
+
+# load_skeleton_model function - REMOVED
+# No longer needed since we're using simple 2D skeleton generation
+
+# calculate_pose_transform_3d function - REMOVED
+# No longer needed since we're using simple 2D skeleton generation
+
+# apply_pose_to_skeleton_3d function - REMOVED
+# No longer needed since we're using simple 2D skeleton generation
+
+# render_skeleton_3d function - REMOVED
+# No longer needed since we're using simple 2D skeleton generation
+
+# generate_3d_skeleton_files function - REMOVED
+# No longer needed since we're using simple 2D skeleton generation
+
+# generate_animated_obj function - REMOVED
+# No longer needed since we're using simple 2D skeleton generation
+
+def generate_animated_wrl(pose_data, output_file, base_wrl_path):
+    """Generate animated WRL file with pose data"""
+    # Read the base skeleton WRL file
+    if not os.path.exists(base_wrl_path):
+        print(f"❌ Base WRL file not found: {base_wrl_path}")
+        return False
+    
+    # Parse base WRL to get structure
+    wrl_data = parse_wrl_file(base_wrl_path)
+    
+    with open(output_file, 'w') as f:
+        f.write(f"#VRML V2.0 utf8\n")
+        f.write(f"# Animated 3D Skeleton from Biomechanical Analysis\n")
+        f.write(f"# Generated on: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
+        f.write(f"# Total frames: {len(pose_data)}\n")
+        f.write(f"# Base skeleton: {base_wrl_path}\n\n")
+        
+        # Write VRML header and setup
+        f.write("NavigationInfo {\n")
+        f.write("  type \"EXAMINE\"\n")
+        f.write("}\n\n")
+        
+        f.write("Viewpoint {\n")
+        f.write("  position 0 0 5\n")
+        f.write("  description \"Default View\"\n")
+        f.write("}\n\n")
+        
+        # Write animation data with proper timing
+        f.write("DEF AnimationGroup Group {\n")
+        f.write("  # Animation sequence with frame timing\n")
+        
+        frame_count = 0
+        for frame_data in pose_data:
+            f.write(f"  # Frame {frame_count}\n")
+            f.write(f"  DEF Frame{frame_count} Transform {{\n")
+            
+            # Apply pose transformations with improved accuracy
+            pose_transform = calculate_pose_transform(frame_data)
+            f.write(f"    translation {pose_transform['translation'][0]:.6f} {pose_transform['translation'][1]:.6f} {pose_transform['translation'][2]:.6f}\n")
+            f.write(f"    rotation {pose_transform['rotation'][0]:.6f} {pose_transform['rotation'][1]:.6f} {pose_transform['rotation'][2]:.6f} {pose_transform['rotation'][3]:.6f}\n")
+            f.write(f"    scale {pose_transform['scale'][0]:.6f} {pose_transform['scale'][1]:.6f} {pose_transform['scale'][2]:.6f}\n")
+            
+            # Include the base skeleton geometry
+            f.write(f"    children [\n")
+            f.write(f"      USE BaseSkeleton\n")
+            f.write(f"    ]\n")
+            f.write(f"  }}\n\n")
+            
+            frame_count += 1
+        
+        f.write("}\n")
+        
+        print(f"✅ Generated animated WRL with {len(pose_data)} frames")
+        print(f"   Each frame has proper 3D transformations")
+        return True
+
+def create_simple_skeleton_obj():
+    """Create a simple human skeleton OBJ file if base file doesn't exist"""
+    try:
+        # Create a simple skeleton with basic human proportions
+        vertices = [
+            # Head
+            [0, 1.7, 0],      # Top of head
+            [0, 1.6, 0],      # Chin
+            [-0.1, 1.65, 0],  # Left ear
+            [0.1, 1.65, 0],   # Right ear
+            
+            # Torso
+            [0, 1.4, 0],      # Neck
+            [0, 1.2, 0],      # Chest
+            [0, 1.0, 0],      # Waist
+            [0, 0.8, 0],      # Hip center
+            
+            # Arms
+            [-0.3, 1.3, 0],   # Left shoulder
+            [-0.5, 1.1, 0],   # Left elbow
+            [-0.6, 0.9, 0],   # Left wrist
+            [0.3, 1.3, 0],    # Right shoulder
+            [0.5, 1.1, 0],    # Right elbow
+            [0.6, 0.9, 0],    # Right wrist
+            
+            # Legs
+            [-0.15, 0.8, 0],  # Left hip
+            [-0.15, 0.4, 0],  # Left knee
+            [-0.15, 0.0, 0],  # Left ankle
+            [0.15, 0.8, 0],   # Right hip
+            [0.15, 0.4, 0],   # Right knee
+            [0.15, 0.0, 0],   # Right ankle
+        ]
+        
+        faces = [
+            # Head
+            [1, 2, 3], [1, 3, 4], [1, 4, 2],
+            # Torso
+            [5, 6, 7], [7, 8, 5],
+            # Arms
+            [9, 10, 11], [12, 13, 14],
+            # Legs
+            [15, 16, 17], [18, 19, 20]
+        ]
+        
+        # Create temporary file
+        temp_file = '/tmp/simple_skeleton.obj'
+        with open(temp_file, 'w') as f:
+            f.write("# Simple Human Skeleton OBJ\n")
+            f.write("# Generated automatically\n\n")
+            
+            for v in vertices:
+                f.write(f"v {v[0]:.6f} {v[1]:.6f} {v[2]:.6f}\n")
+            
+            for face in faces:
+                f.write(f"f {face[0]} {face[1]} {face[2]}\n")
+        
+        print(f"✅ Created simple skeleton OBJ: {temp_file}")
+        return temp_file
+        
+    except Exception as e:
+        print(f"❌ Error creating simple skeleton OBJ: {e}")
+        return None
+
+def create_simple_skeleton_wrl():
+    """Create a simple human skeleton WRL file if base file doesn't exist"""
+    try:
+        # Create a simple VRML skeleton
+        temp_file = '/tmp/simple_skeleton.wrl'
+        with open(temp_file, 'w') as f:
+            f.write("#VRML V2.0 utf8\n")
+            f.write("# Simple Human Skeleton WRL\n")
+            f.write("# Generated automatically\n\n")
+            
+            f.write("NavigationInfo {\n")
+            f.write("  type \"EXAMINE\"\n")
+            f.write("}\n\n")
+            
+            f.write("Viewpoint {\n")
+            f.write("  position 0 0 5\n")
+            f.write("  description \"Default View\"\n")
+            f.write("}\n\n")
+            
+            f.write("DEF BaseSkeleton Group {\n")
+            f.write("  children [\n")
+            f.write("    # Simple skeleton representation\n")
+            f.write("    Shape {\n")
+            f.write("      geometry Sphere {\n")
+            f.write("        radius 0.05\n")
+            f.write("      }\n")
+            f.write("      appearance Appearance {\n")
+            f.write("        material Material {\n")
+            f.write("          diffuseColor 0.8 0.8 0.8\n")
+            f.write("        }\n")
+            f.write("      }\n")
+            f.write("    }\n")
+            f.write("  ]\n")
+            f.write("}\n")
+        
+        print(f"✅ Created simple skeleton WRL: {temp_file}")
+        return temp_file
+        
+    except Exception as e:
+        print(f"❌ Error creating simple skeleton WRL: {e}")
+        return None
+
+def parse_obj_file(obj_path):
+    """Parse OBJ file and return vertices and faces"""
+    vertices = []
+    faces = []
+    
+    with open(obj_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if line.startswith('v '):
+                # Vertex line: v x y z
+                parts = line.split()[1:]
+                vertices.append([float(x) for x in parts[:3]])
+            elif line.startswith('f '):
+                # Face line: f v1 v2 v3
+                parts = line.split()[1:]
+                faces.append([int(x) for x in parts[:3]])
+    
+    return vertices, faces
+
+def parse_wrl_file(wrl_path):
+    """Parse WRL file and return basic structure"""
+    # For now, return a simple structure
+    # In a full implementation, you'd parse the VRML file properly
+    return {
+        'geometry': 'base_skeleton',
+        'format': 'vrml2'
+    }
+
+def apply_pose_to_vertices(vertices, pose_data, frame_width, frame_height):
+    """Apply pose transformations to 3D vertices with proper joint mapping"""
+    # MediaPipe pose landmarks to skeleton joint mapping
+    # This maps the 2D pose data to skeleton positioning
+    
+    # Key pose points for positioning and scaling
+    pose_points = {}
+    for key, value in pose_data.items():
+        if key.endswith('_x') or key.endswith('_y'):
+            pose_points[key] = value
+    
+    # Calculate body proportions for scaling
+    if 'left_shoulder_x' in pose_points and 'right_shoulder_x' in pose_points:
+        shoulder_width = abs(pose_points['right_shoulder_x'] - pose_points['left_shoulder_x'])
+        # Convert normalized coordinates to pixel coordinates
+        shoulder_width_px = shoulder_width * frame_width
+        
+        # Scale factor based on shoulder width (typical human proportions)
+        scale_factor = shoulder_width_px / 200.0  # Adjust based on your skeleton model
+        
+        # Calculate body center for positioning
+        if 'left_hip_x' in pose_points and 'right_hip_x' in pose_points:
+            hip_center_x = (pose_points['left_hip_x'] + pose_points['right_hip_x']) / 2.0
+            hip_center_y = (pose_points['left_hip_y'] + pose_points['right_hip_y']) / 2.0
+            
+            # Convert to 3D coordinates
+            center_x = (hip_center_x - 0.5) * 2.0  # Center and scale to -1 to 1
+            center_y = (0.5 - hip_center_y) * 2.0  # Flip Y and scale to -1 to 1
+            
+            transformed_vertices = []
+            for v in vertices:
+                # Apply scaling and positioning
+                new_v = [
+                    v[0] * scale_factor + center_x,
+                    v[1] * scale_factor + center_y,
+                    v[2] * scale_factor  # Keep Z depth
+                ]
+                transformed_vertices.append(new_v)
+            
+            return transformed_vertices
+    
+    return vertices
+
+def calculate_pose_transform(pose_data):
+    """Calculate 3D transform from pose data with improved accuracy"""
+    # Enhanced transform calculation using multiple pose points
+    
+    # Default transform
+    transform = {
+        'translation': [0.0, 0.0, 0.0],
+        'rotation': [0.0, 0.0, 1.0, 0.0],  # axis-angle format
+        'scale': [1.0, 1.0, 1.0]
+    }
+    
+    # Calculate body center from multiple key points
+    center_points = []
+    
+    # Hip center
+    if 'left_hip_x' in pose_data and 'right_hip_x' in pose_data:
+        hip_center_x = (pose_data['left_hip_x'] + pose_data['right_hip_x']) / 2.0
+        hip_center_y = (pose_data['left_hip_y'] + pose_data['right_hip_y']) / 2.0
+        center_points.append((hip_center_x, hip_center_y))
+    
+    # Shoulder center
+    if 'left_shoulder_x' in pose_data and 'right_shoulder_x' in pose_data:
+        shoulder_center_x = (pose_data['left_shoulder_x'] + pose_data['right_shoulder_x']) / 2.0
+        shoulder_center_y = (pose_data['left_shoulder_y'] + pose_data['right_shoulder_y']) / 2.0
+        center_points.append((shoulder_center_x, shoulder_center_y))
+    
+    # Calculate overall body center
+    if center_points:
+        avg_x = sum(p[0] for p in center_points) / len(center_points)
+        avg_y = sum(p[1] for p in center_points) / len(center_points)
+        
+        # Convert to 3D coordinates
+        transform['translation'] = [
+            (avg_x - 0.5) * 2.0,  # Center and scale to -1 to 1
+            (0.5 - avg_y) * 2.0,   # Flip Y and scale to -1 to 1
+            0.0                     # Z position (depth)
+        ]
+    
+    # Calculate scale based on body proportions
+    if 'left_shoulder_x' in pose_data and 'right_shoulder_x' in pose_data:
+        shoulder_width = abs(pose_data['right_shoulder_x'] - pose_data['left_shoulder_x'])
+        # Scale factor based on shoulder width
+        scale_factor = shoulder_width * 2.0  # Adjust based on your skeleton model
+        transform['scale'] = [scale_factor, scale_factor, scale_factor]
+    
+    # Calculate rotation based on body orientation
+    if 'left_shoulder_x' in pose_data and 'right_shoulder_x' in pose_data and 'left_hip_x' in pose_data and 'right_hip_x' in pose_data:
+        # Calculate body tilt from shoulders to hips
+        shoulder_center_x = (pose_data['left_shoulder_x'] + pose_data['right_shoulder_x']) / 2.0
+        hip_center_x = (pose_data['left_hip_x'] + pose_data['right_hip_x']) / 2.0
+        
+        # Simple rotation calculation (can be enhanced)
+        if abs(shoulder_center_x - hip_center_x) > 0.01:  # If there's significant tilt
+            rotation_angle = math.atan2(shoulder_center_x - hip_center_x, 0.1) * 0.1
+            transform['rotation'] = [0.0, 0.0, 1.0, rotation_angle]
+    
+    return transform
+
+# create_3d_skeleton_preview function - REMOVED
+# No longer needed since we're using simple 2D skeleton generation
+
+# Removed shot_speed and stick_tracking functions due to accuracy issues
+
+def analyze_player_tracking(video_path, filename):
+    """Player tracking analysis"""
+    output_video = f"player_tracking_{filename}"
+    output_video_path = os.path.join(app.config['OUTPUT_FOLDER'], output_video)
+    
+    return {
+        'success': True,
+        'analysis_id': 'player_tracking',
+        'analysis_type': 'player_tracking',
+        'message': 'Player tracking analysis completed',
+        'requires_interaction': False,
+        'results': [
+            {
+                'name': output_video,
+                'type': 'video',
+                'description': 'Annotated video with multi-player detection',
+                'preview': True,
+                'download': True
+            }
+        ]
+    }
+
+@app.route('/download/<filename>')
+def download_file(filename):
+    file_path = os.path.join(app.config['OUTPUT_FOLDER'], filename)
+    if os.path.exists(file_path):
+        return send_file(file_path, as_attachment=True)
+    return jsonify({'error': 'File not found'}), 404
+
+# download_3d_skeleton function - REMOVED
+# No longer needed since we're using simple 2D skeleton generation
+
+@app.route('/view/<filename>')
+def view_file(filename):
+    """Serve files for viewing in browser"""
+    file_path = os.path.join(app.config['OUTPUT_FOLDER'], filename)
+    if os.path.exists(file_path):
+        return send_file(file_path)
+    return jsonify({'error': 'File not found'}), 404
+
+@app.route('/results/<analysis_id>')
+def get_results(analysis_id):
+    """Get results for a specific analysis"""
+    results_dir = app.config['OUTPUT_FOLDER']
+    files = []
+    
+    for filename in os.listdir(results_dir):
+        if analysis_id in filename:
+            file_path = os.path.join(results_dir, filename)
+            if os.path.isfile(file_path):
+                file_size = os.path.getsize(file_path)
+                file_type = filename.split('.')[-1]
+                files.append({
+                    'name': filename,
+                    'size': file_size,
+                    'type': file_type,
+                    'url': f'/view/{filename}',
+                    'download_url': f'/download/{filename}'
+                })
+    
+    return jsonify(files)
+
+@app.route('/files')
+def list_files():
+    """List all output files"""
+    files = []
+    output_dir = app.config['OUTPUT_FOLDER']
+    
+    for filename in os.listdir(output_dir):
+        file_path = os.path.join(output_dir, filename)
+        if os.path.isfile(file_path):
+            files.append({
+                'name': filename,
+                'size': os.path.getsize(file_path),
+                'type': filename.split('_')[0] if '_' in filename else 'unknown'
+            })
+    
+    return jsonify(files)
+
+def analyze_motion_capture(video_path, filename):
+    """Off-ice analysis - requires person selection first"""
+    try:
+        print(f"🎬 Motion capture analysis requested for: {filename}")
+        
+        # Generate output filenames
+        base_name = os.path.splitext(filename)[0]
+        output_csv = f"off_ice_metrics_{base_name}.csv"
+        output_video = f"off_ice_analysis_{filename}"
+        output_skeleton = f"off_ice_skeleton_{base_name}.mp4"
+        
+        output_csv_path = os.path.join(app.config['OUTPUT_FOLDER'], output_csv)
+        output_video_path = os.path.join(app.config['OUTPUT_FOLDER'], output_video)
+        output_skeleton_path = os.path.join(app.config['OUTPUT_FOLDER'], output_skeleton)
+        
+        print(f"✅ Motion capture analysis ready - waiting for person selection")
+        
+        return {
+            'success': True,
+            'analysis_id': 'motion_capture',
+            'analysis_type': 'motion_capture',
+            'message': 'Off-ice analysis requires person selection. Use the interactive interface below.',
+            'requires_interaction': True,
+            'video_filename': filename,
+            'results': [
+                {
+                    'name': output_csv,
+                    'type': 'csv',
+                    'description': 'Complete off-ice exercise data with joint trajectories',
+                    'preview': False,
+                    'download': True
+                },
+                {
+                    'name': output_video,
+                    'type': 'video',
+                    'description': 'Annotated video with off-ice motion tracking',
+                    'preview': True,
+                    'download': True
+                },
+                {
+                    'name': output_skeleton,
+                    'type': 'video',
+                    'description': 'Off-ice skeleton animation video',
+                    'preview': True,
+                    'download': True
+                }
+            ]
+        }
+        
+    except Exception as e:
+        print(f"❌ Error in motion capture analysis: {e}")
+        return {
+            'success': False,
+            'analysis_id': 'motion_capture',
+            'analysis_type': 'motion_capture',
+            'message': f'Motion capture analysis failed: {str(e)}',
+            'requires_interaction': False,
+            'video_filename': filename,
+            'results': []
+        }
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', '3425'))
+    # Disable debug mode for much better performance
+    app.run(debug=False, host='127.0.0.1', port=port, threaded=True)

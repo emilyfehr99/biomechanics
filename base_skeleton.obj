@@ -1,0 +1,37 @@
+# Simple Human Skeleton OBJ File
+# Generated for biomechanical analysis
+
+# Basic skeleton vertices (key joint positions)
+v 0.0 1.7 0.0    # Head
+v 0.0 1.5 0.0    # Neck
+v 0.0 1.3 0.0    # Chest
+v 0.0 1.0 0.0    # Hip center
+v -0.2 1.0 0.0   # Left hip
+v 0.2 1.0 0.0    # Right hip
+v -0.2 0.5 0.0   # Left knee
+v 0.2 0.5 0.0    # Right knee
+v -0.2 0.0 0.0   # Left ankle
+v 0.2 0.0 0.0    # Right ankle
+v -0.3 1.3 0.0   # Left shoulder
+v 0.3 1.3 0.0    # Right shoulder
+v -0.5 1.0 0.0   # Left elbow
+v 0.5 1.0 0.0    # Right elbow
+v -0.7 0.7 0.0   # Left wrist
+v 0.7 0.7 0.0    # Right wrist
+
+# Skeleton connections (lines)
+l 1 2    # Head to Neck
+l 2 3    # Neck to Chest
+l 3 4    # Chest to Hip
+l 4 5    # Hip to Left Hip
+l 4 6    # Hip to Right Hip
+l 5 7    # Left Hip to Left Knee
+l 6 8    # Right Hip to Right Knee
+l 7 9    # Left Knee to Left Ankle
+l 8 10   # Right Knee to Right Ankle
+l 3 11   # Chest to Left Shoulder
+l 3 12   # Chest to Right Shoulder
+l 11 13  # Left Shoulder to Left Elbow
+l 12 14  # Right Shoulder to Right Elbow
+l 13 15  # Left Elbow to Left Wrist
+l 14 16  # Right Elbow to Right Wrist
